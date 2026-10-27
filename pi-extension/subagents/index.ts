@@ -1,7 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { keyHint } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Container, Input, SelectList, Spacer, Text, fuzzyFilter, truncateToWidth, visibleWidth, type SelectItem, type SelectListTheme, type TUI } from "@mariozechner/pi-tui";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,6 +12,8 @@ import {
   mkdirSync,
   copyFileSync,
   unlinkSync,
+  renameSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -304,12 +306,12 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
   };
 }
 
-function discoverAgentDefinitions(): ListedAgentDefinition[] {
+function discoverAgentDefinitions(cwd = process.cwd()): ListedAgentDefinition[] {
   const agents = new Map<string, ListedAgentDefinition>();
   const dirs: Array<{ path: string; source: AgentSource }> = [
     { path: getBundledAgentsDir(), source: "package" },
     { path: join(getAgentConfigDir(), "agents"), source: "global" },
-    { path: join(process.cwd(), ".pi", "agents"), source: "project" },
+    { path: join(cwd, ".pi", "agents"), source: "project" },
   ];
 
   for (const { path: dir, source } of dirs) {
@@ -401,21 +403,198 @@ function resolveEffectiveInteractive(
   return !(agentDefs?.autoExit ?? false);
 }
 
-function loadAgentDefaults(agentName: string): AgentDefaults | null {
+function agentDefinitionPaths(agentName: string, cwd = process.cwd()): string[] {
   const configDir = getAgentConfigDir();
-  const paths = [
-    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+  return [
+    join(cwd, ".pi", "agents", `${agentName}.md`),
     join(configDir, "agents", `${agentName}.md`),
     join(getBundledAgentsDir(), `${agentName}.md`),
   ];
+}
 
-  for (const p of paths) {
+function loadAgentDefaults(agentName: string, cwd = process.cwd()): AgentDefaults | null {
+  for (const p of agentDefinitionPaths(agentName, cwd)) {
     if (!existsSync(p)) continue;
     const parsed = parseAgentDefinition(readFileSync(p, "utf8"), agentName);
     if (parsed) return parsed;
   }
 
   return null;
+}
+
+function parseModelId(value: string): { provider: string; modelId: string } | null {
+  if (!value || /\s/.test(value)) return null;
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return null;
+  return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
+}
+
+const MANUAL_MODEL_ID = "__manual_model__";
+
+class ScrollableModelPicker extends Container {
+  private readonly searchInput = new Input();
+  private readonly listContainer = new Container();
+  private readonly allItems: SelectItem[];
+  private filteredItems: SelectItem[];
+  private selectedIndex = 0;
+  private list: SelectList;
+  private readonly listTheme: SelectListTheme;
+  private readonly tui: TUI;
+  private readonly keybindings: KeybindingsManager;
+  private readonly done: (value: string | undefined) => void;
+  private focusedState = false;
+
+  constructor(
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    items: SelectItem[],
+    done: (value: string | undefined) => void,
+  ) {
+    super();
+    this.tui = tui;
+    this.keybindings = keybindings;
+    this.done = done;
+    this.allItems = items;
+    this.filteredItems = items;
+    this.listTheme = {
+      selectedPrefix: (text) => theme.fg("accent", text),
+      selectedText: (text) => theme.fg("accent", text),
+      description: (text) => theme.fg("muted", text),
+      scrollInfo: (text) => theme.fg("muted", text),
+      noMatch: (text) => theme.fg("muted", text.replace("commands", "models")),
+    };
+
+    this.addChild(new DynamicBorder((text) => theme.fg("border", text)));
+    this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg("accent", "Choose a model"), 0, 0));
+    this.addChild(new Text(theme.fg("muted", "Type to search · ↑/↓ to scroll · Enter to select · Esc to cancel"), 0, 0));
+    this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg("muted", "Filter:"), 0, 0));
+    this.addChild(this.searchInput);
+    this.addChild(new Spacer(1));
+    this.addChild(this.listContainer);
+    this.addChild(new Spacer(1));
+    this.addChild(new DynamicBorder((text) => theme.fg("border", text)));
+    this.list = new SelectList(items, 10, this.listTheme, { maxPrimaryColumnWidth: 56 });
+    this.list.onSelect = (item) => this.done(item.value);
+    this.list.onCancel = () => this.done(undefined);
+    this.listContainer.addChild(this.list);
+  }
+
+  get focused(): boolean {
+    return this.focusedState;
+  }
+
+  set focused(value: boolean) {
+    this.focusedState = value;
+    this.searchInput.focused = value;
+  }
+
+  handleInput(data: string): void {
+    if (this.keybindings.matches(data, "tui.select.up")) {
+      this.moveSelection(-1);
+    } else if (this.keybindings.matches(data, "tui.select.down")) {
+      this.moveSelection(1);
+    } else if (this.keybindings.matches(data, "tui.select.confirm")) {
+      const selected = this.list.getSelectedItem();
+      if (selected) this.list.onSelect?.(selected);
+    } else if (this.keybindings.matches(data, "tui.select.cancel")) {
+      this.list.onCancel?.();
+    } else {
+      this.searchInput.handleInput(data);
+      this.applyFilter(this.searchInput.getValue());
+    }
+    this.tui.requestRender();
+  }
+
+  private moveSelection(delta: number): void {
+    if (this.filteredItems.length === 0) return;
+    this.selectedIndex = (this.selectedIndex + delta + this.filteredItems.length) % this.filteredItems.length;
+    this.list.setSelectedIndex(this.selectedIndex);
+  }
+
+  private applyFilter(query: string): void {
+    this.filteredItems = query
+      ? fuzzyFilter(this.allItems, query, (item) => `${item.value} ${item.label} ${item.description ?? ""}`)
+      : this.allItems;
+    this.selectedIndex = 0;
+    this.listContainer.clear();
+    this.list = new SelectList(this.filteredItems, 10, this.listTheme, { maxPrimaryColumnWidth: 56 });
+    this.list.onSelect = (item) => this.done(item.value);
+    this.list.onCancel = () => this.done(undefined);
+    this.listContainer.addChild(this.list);
+  }
+}
+
+async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undefined> {
+  const models = ctx.modelRegistry.getAvailable();
+  const items: SelectItem[] = models.map((model) => {
+    const id = `${model.provider}/${model.id}`;
+    const context = model.contextWindow ? ` · ${model.contextWindow.toLocaleString()} ctx` : "";
+    return { value: id, label: id, description: `${model.name}${context}` };
+  });
+  items.push({
+    value: MANUAL_MODEL_ID,
+    label: "Enter provider/model ID manually",
+    description: "Use an ID not listed in Pi",
+  });
+
+  const selected = await ctx.ui.custom<string | undefined>(
+    (tui, theme, keybindings, done) => new ScrollableModelPicker(tui, theme, keybindings, items, done),
+  );
+  if (!selected) return undefined;
+  if (selected !== MANUAL_MODEL_ID) return selected;
+
+  const entered = (await ctx.ui.input("Enter provider/model ID"))?.trim();
+  if (!entered) return undefined;
+  const parsed = parseModelId(entered);
+  if (!parsed) {
+    ctx.ui.notify("Enter a model ID in provider/model format.", "error");
+    return undefined;
+  }
+  const availableIds = new Set(models.map((model) => `${model.provider}/${model.id}`));
+  if (!availableIds.has(entered)) {
+    ctx.ui.notify(`Model ${entered} is not currently available in Pi; it will be attempted and may fail.`, "warning");
+  }
+  return entered;
+}
+
+function updateAgentModel(content: string, modelId: string): string | undefined {
+  const match = /^---(\r?\n)([\s\S]*?)\r?\n---/.exec(content);
+  if (!match) return undefined;
+  const newline = match[1];
+  const frontmatter = match[2];
+  const lines = frontmatter.split(/\r?\n/);
+  const modelLine = lines.findIndex((line) => /^model\s*:/.test(line));
+  if (modelLine === -1) lines.push(`model: ${modelId}`);
+  else lines[modelLine] = `model: ${modelId}`;
+  return content.replace(match[0], `---${newline}${lines.join(newline)}${newline}---`);
+}
+
+function saveAgentModel(agentName: string, modelId: string, scope: "project" | "global", cwd: string): void {
+  if (!agentName || agentName === "." || agentName === ".." || agentName.includes("/") || agentName.includes("\\") || agentName.includes("\0")) {
+    throw new Error("Invalid agent name");
+  }
+  if (!parseModelId(modelId)) throw new Error("Invalid model ID");
+
+  const paths = agentDefinitionPaths(agentName, cwd);
+  const target = scope === "project" ? paths[0] : paths[1];
+  const source = paths.find(existsSync);
+  if (!source) throw new Error(`Agent definition not found: ${agentName}`);
+  const content = readFileSync(existsSync(target) ? target : source, "utf8");
+  const updated = updateAgentModel(content, modelId);
+  if (!updated) throw new Error(`Agent definition has invalid frontmatter: ${agentName}`);
+
+  mkdirSync(dirname(target), { recursive: true });
+  const tempPath = `${target}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tempPath, updated, { flag: "wx" });
+    renameSync(tempPath, target);
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch {}
+    throw error;
+  }
 }
 
 function formatElapsed(seconds: number): string {
@@ -1131,6 +1310,7 @@ export const __test__ = {
   buildSubagentToolAllowlist,
   applySandboxToParts,
   buildPiPromptArgs,
+  ScrollableModelPicker,
   formatWidgetRightLabel,
   observeRunningSubagent,
   getToolExtensionPath,
@@ -1963,8 +2143,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "Project-local agents override global ones with the same name.",
       parameters: Type.Object({}),
 
-      async execute() {
-        const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
+      async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+        const list = discoverAgentDefinitions(ctx?.cwd ?? process.cwd()).filter((agent) => !agent.disableModelInvocation);
 
         if (list.length === 0) {
           return {
@@ -1976,7 +2156,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const lines = list.map((a) => {
           const badge = a.source === "project" ? " (project)" : "";
           const desc = a.description ? ` — ${a.description}` : "";
-          const model = a.model ? ` [${a.model}]` : "";
+          const model = ` [${a.model ?? "Pi default"}]`;
           return `• ${a.name}${badge}${model}${desc}`;
         });
 
@@ -1995,7 +2175,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const lines = agents.map((a: any) => {
           const badge = a.source === "project" ? theme.fg("accent", " (project)") : "";
           const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
-          const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
+          const model = theme.fg("dim", ` [${a.model ?? "Pi default"}]`);
           return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
         });
         return new Text(lines.join("\n"), 0, 0);
@@ -2318,6 +2498,60 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         };
       },
     });
+
+  // /subagents command — interactively spawn an agent or change its model default
+  pi.registerCommand("subagents", {
+    description: "Choose a model and manage subagent defaults",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/subagents requires interactive mode", "error");
+        return;
+      }
+
+      const agents = discoverAgentDefinitions(ctx.cwd).filter((agent) => !agent.disableModelInvocation && agent.cli !== "claude");
+      if (agents.length === 0) {
+        ctx.ui.notify("No Pi subagent definitions found.", "warning");
+        return;
+      }
+      const agentName = await ctx.ui.select("Choose an agent", agents.map((agent) => agent.name));
+      if (!agentName) return;
+      const agent = agents.find((candidate) => candidate.name === agentName);
+      if (!agent) return;
+
+      const action = await ctx.ui.select("Choose an action", ["Spawn once", "Change default"]);
+      if (!action) return;
+      const modelId = await chooseModel(ctx);
+      if (!modelId) return;
+
+      if (action === "Change default") {
+        const scope = await ctx.ui.select("Save this default where?", ["Project-local", "Global"]);
+        if (!scope) return;
+        let targetScope: "project" | "global" = scope === "Project-local" ? "project" : "global";
+        if (targetScope === "global" && agent.source === "project") {
+          const conflict = await ctx.ui.select("A project-local definition overrides the global default.", [
+            "Save globally anyway (won't affect this project)",
+            "Switch to project-local",
+            "Cancel",
+          ]);
+          if (conflict === "Cancel" || !conflict) return;
+          if (conflict === "Switch to project-local") targetScope = "project";
+        }
+        try {
+          saveAgentModel(agent.name, modelId, targetScope, ctx.cwd);
+          ctx.ui.notify(`Saved ${modelId} as the ${targetScope}-local default for ${agent.name}.`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Could not save model default: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
+      const task = (await ctx.ui.input(`Task — model selected: ${modelId}`))?.trim();
+      if (!task) return;
+      pi.sendUserMessage(
+        `Use the subagent tool with these exact parameters: ${JSON.stringify({ agent: agent.name, model: modelId, task })}`,
+      );
+    },
+  });
 
   // /subagent command — spawn a subagent by name
   pi.registerCommand("subagent", {
