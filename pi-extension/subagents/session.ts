@@ -100,6 +100,8 @@ export interface SubagentLoadout {
   toolAllowlist: string | null;
   /** Model id (without thinking suffix), or null to use the session default. */
   model: string | null;
+  /** Where the model came from, for active-subagent status; optional for older snapshots. */
+  modelSource?: "spawn override" | "agent default" | "Pi default" | "Pi default fallback" | "CLI default";
   /** Thinking level appended to the model as `model:level`, or null. */
   thinking: string | null;
   /** How the identity text was applied: append/replace, or null. */

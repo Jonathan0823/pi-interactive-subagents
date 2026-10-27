@@ -2806,6 +2806,56 @@ describe("subagents widget rendering", () => {
     }
   });
 
+  it("shows the model and its source in active-subagent status", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const startTime = Date.now();
+    const lines = testApi.renderSubagentWidgetLines([{
+      id: "model-agent",
+      name: "scout",
+      task: "",
+      agent: "scout",
+      model: "anthropic/claude-test",
+      modelSource: "spawn override",
+      surface: "s1",
+      startTime,
+      sessionFile: "missing-session",
+      statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+    }], 100);
+
+    assert.match(lines[1], /anthropic\/claude-test/);
+    assert.match(lines[1], /spawn override/);
+  });
+
+  it("shows the model reported by a running session when available", () => {
+    const testApi = (subagentsModule as any).__test__;
+    withTempDir((dir) => {
+      const sessionFile = createSessionFile(dir, [
+        SESSION_HEADER,
+        {
+          type: "message",
+          id: "assistant-active",
+          parentId: null,
+          message: { role: "assistant", model: "openai/runtime-model", content: [{ type: "text", text: "working" }] },
+        },
+      ]);
+      const startTime = Date.now();
+      const lines = testApi.renderSubagentWidgetLines([{
+        id: "model-agent",
+        name: "scout",
+        task: "",
+        agent: "scout",
+        model: null,
+        modelSource: "Pi default",
+        surface: "s1",
+        startTime,
+        sessionFile,
+        statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+      }], 100);
+
+      assert.match(lines[1], /openai\/runtime-model \(Pi default\)/);
+    });
+  });
+
   it("truncates the right-hand status instead of overflowing when it alone is too wide", () => {
     const testApi = (subagentsModule as any).__test__;
     assert.ok(testApi, "expected subagents test helpers to be exported");

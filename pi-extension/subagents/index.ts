@@ -120,6 +120,7 @@ type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 
 interface AgentDefaults {
   model?: string;
+  fallbackModel?: "pi-default";
   tools?: string;
   skills?: string;
   thinking?: string;
@@ -141,6 +142,7 @@ interface AgentDefaults {
 }
 
 type AgentSource = "package" | "global" | "project";
+type ModelSource = "spawn override" | "agent default" | "Pi default" | "Pi default fallback" | "CLI default";
 
 interface AgentDefinition extends AgentDefaults {
   name: string;
@@ -783,6 +785,11 @@ interface RunningSubagent {
   name: string;
   task: string;
   agent?: string;
+  model?: string | null;
+  modelSource?: ModelSource;
+  fallbackModel?: string;
+  actualModel?: string;
+  modelFileMtimeMs?: number;
   surface: string;
   startTime: number;
   sessionFile: string;
@@ -831,6 +838,37 @@ let widgetInterval: ReturnType<typeof setInterval> | null = null;
 
 /** Interval timer for status transition checks. */
 let statusInterval: ReturnType<typeof setInterval> | null = null;
+
+function modelSourceFor(modelOverride: string | undefined, agent: AgentDefaults | null): ModelSource {
+  if (modelOverride) return "spawn override";
+  if (agent?.model) return "agent default";
+  return agent?.cli === "claude" ? "CLI default" : "Pi default";
+}
+
+function resolveFallbackModel(
+  fallbackSetting: AgentDefaults["fallbackModel"],
+  parentModel: { provider: string; id: string } | undefined,
+  preferredModel: string | undefined,
+): string | undefined {
+  if (fallbackSetting !== "pi-default" || !parentModel) return undefined;
+  const fallback = `${parentModel.provider}/${parentModel.id}`;
+  return fallback === preferredModel ? undefined : fallback;
+}
+
+function activeModelLabel(agent: RunningSubagent): string {
+  try {
+    const mtimeMs = statSync(agent.sessionFile).mtimeMs;
+    if (mtimeMs !== agent.modelFileMtimeMs) {
+      agent.modelFileMtimeMs = mtimeMs;
+      agent.actualModel = summarizeSessionStats(agent.sessionFile)?.model ?? agent.actualModel;
+    }
+  } catch {
+    // The session file may not exist yet while the child process is starting.
+  }
+
+  const model = agent.actualModel ?? agent.model;
+  return model ? `${model} (${agent.modelSource ?? "Pi default"})` : agent.modelSource ?? "";
+}
 
 function formatElapsedMMSS(startTime: number): string {
   const seconds = Math.floor((Date.now() - startTime) / 1000);
@@ -911,7 +949,8 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const icon = widgetIcon(snapshot.kind);
-    const left = ` ${icon} ${elapsed}  ${agent.name}${agentTag} `;
+    const modelTag = activeModelLabel(agent);
+    const left = ` ${icon} ${elapsed}  ${agent.name}${agentTag}${modelTag ? ` · ${modelTag}` : ""} `;
     const right = statusConfig.enabled
       ? formatWidgetRightLabel(snapshot)
       : agent.cli === "claude"
@@ -1347,14 +1386,18 @@ function startWidgetRefresh() {
  */
 async function launchSubagent(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
-  options?: { surface?: string },
+  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string; model?: { provider: string; id: string } },
+  options?: { surface?: string; modelSource?: ModelSource },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
-  const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+  const agentDefs = params.agent ? loadAgentDefaults(params.agent, ctx.cwd) : null;
   const effectiveModel = params.model ?? agentDefs?.model;
+  const modelSource = options?.modelSource ?? modelSourceFor(params.model, agentDefs);
+  const fallbackModel = agentDefs?.cli === "claude"
+    ? undefined
+    : resolveFallbackModel(agentDefs?.fallbackModel, ctx.model, effectiveModel);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1475,6 +1518,8 @@ async function launchSubagent(
       name: params.name,
       task: params.task,
       agent: params.agent,
+      model: effectiveModel ?? null,
+      modelSource,
       surface,
       startTime,
       sessionFile: subagentSessionFile,
@@ -1520,6 +1565,7 @@ async function launchSubagent(
   // restriction instead of relaunching pi with all global extensions + tools.
   const loadout: SubagentLoadout = {
     agent: params.agent ?? null,
+    modelSource,
     toolAllowlist,
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
@@ -1617,6 +1663,9 @@ async function launchSubagent(
     name: params.name,
     task: params.task,
     agent: params.agent,
+    model: effectiveModel ?? null,
+    modelSource,
+    ...(fallbackModel ? { fallbackModel } : {}),
     surface,
     startTime,
     sessionFile: subagentSessionFile,
@@ -2419,6 +2468,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           id,
           name,
           task: message,
+          model: loadout.model,
+          modelSource: loadout.modelSource ?? (loadout.model ? "agent default" : "Pi default"),
           surface,
           startTime,
           sessionFile: sessionPath,
