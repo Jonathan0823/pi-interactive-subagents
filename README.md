@@ -36,6 +36,8 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 There is also a `/subagent <agent> <task>` command for spawning directly.
 
+`/subagents` provides an interactive model manager. It starts with the selected agent’s saved model and thinking level (or the parent’s current model and Pi’s configured thinking default when unset). **Spawn once** uses the chosen pair for that spawn only; **Change default** saves both together to a project-local or global agent profile. Thinking choices follow the selected model’s capabilities; for an unlisted model, Pi applies its own capability handling. Choosing **Pi default / unset** removes the profile’s `thinking` field.
+
 ### Spawning
 
 ```typescript
@@ -49,6 +51,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `task` | string | required | Task prompt |
 | `name` | string | agent name | Display name for the pane and widget. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
 | `model` | string | agent's model | Override the model for this spawn |
+| `thinking` | string or `null` | agent's thinking setting | Override the level for this spawn; `null` leaves it to Pi's configured default |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
 
 ### Messaging
@@ -108,7 +111,7 @@ You are a specialized agent that does X...
 | `description` | string | Shown in `subagents_list` |
 | `model` | string | Default model |
 | `fallback-model` | `pi-default` | Retry once with the parent session's current model after a provider/agent error. Pi CLI agents only; no retry if the parent model is unavailable or identical to the primary model |
-| `thinking` | string | `minimal`, `low`, `medium`, or `high` |
+| `thinking` | string | `off`, `minimal`, `low`, `medium`, `high`, or `xhigh` (subject to model support); omit for Pi's configured default |
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `web_fetch`, `safe_bash`, `video_extract`, `youtube_search`, `google_image_search`. Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |

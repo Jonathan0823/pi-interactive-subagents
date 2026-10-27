@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, keyHint } from "@mariozechner/pi-coding-agent";
+import * as piAi from "@mariozechner/pi-ai";
+import type { Model } from "@mariozechner/pi-ai";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Container, Input, SelectList, Spacer, Text, fuzzyFilter, truncateToWidth, visibleWidth, type SelectItem, type SelectListTheme, type TUI } from "@mariozechner/pi-tui";
 import { dirname, join, resolve } from "node:path";
@@ -97,7 +99,7 @@ const SubagentParams = Type.Object({
   agent: Type.String({
     description:
       "Which agent to spawn (e.g. 'worker', 'scout', 'researcher'). This loads the agent's " +
-      "fixed profile — its model, tool loadout, and system prompt. Must be one of the available agents.",
+      "fixed profile — its model, thinking level, tool loadout, and system prompt. Must be one of the available agents.",
   }),
   task: Type.String({ description: "Task/prompt for the sub-agent" }),
   name: Type.Optional(
@@ -108,6 +110,17 @@ const SubagentParams = Type.Object({
     }),
   ),
   model: Type.Optional(Type.String({ description: "Model override (overrides agent default)" })),
+  thinking: Type.Optional(
+    Type.Union([
+      Type.Literal("off"),
+      Type.Literal("minimal"),
+      Type.Literal("low"),
+      Type.Literal("medium"),
+      Type.Literal("high"),
+      Type.Literal("xhigh"),
+      Type.Null(),
+    ], { description: "Thinking override for Pi agents; null ignores the profile and leaves Pi's configured default in control" }),
+  ),
   cwd: Type.Optional(
     Type.String({
       description:
@@ -433,6 +446,9 @@ function parseModelId(value: string): { provider: string; modelId: string } | nu
 }
 
 const MANUAL_MODEL_ID = "__manual_model__";
+const PI_DEFAULT_THINKING = "__pi_default_thinking__";
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 class ScrollableModelPicker extends Container {
   private readonly searchInput = new Input();
@@ -445,6 +461,7 @@ class ScrollableModelPicker extends Container {
   private readonly tui: TUI;
   private readonly keybindings: KeybindingsManager;
   private readonly done: (value: string | undefined) => void;
+  private readonly noMatchReplacement: string;
   private focusedState = false;
 
   constructor(
@@ -453,6 +470,7 @@ class ScrollableModelPicker extends Container {
     keybindings: KeybindingsManager,
     items: SelectItem[],
     done: (value: string | undefined) => void,
+    options: { title?: string; initialValue?: string; noMatchReplacement?: string } = {},
   ) {
     super();
     this.tui = tui;
@@ -460,17 +478,19 @@ class ScrollableModelPicker extends Container {
     this.done = done;
     this.allItems = items;
     this.filteredItems = items;
+    this.selectedIndex = Math.max(0, items.findIndex((item) => item.value === options.initialValue));
+    this.noMatchReplacement = options.noMatchReplacement ?? "models";
     this.listTheme = {
       selectedPrefix: (text) => theme.fg("accent", text),
       selectedText: (text) => theme.fg("accent", text),
       description: (text) => theme.fg("muted", text),
       scrollInfo: (text) => theme.fg("muted", text),
-      noMatch: (text) => theme.fg("muted", text.replace("commands", "models")),
+      noMatch: (text) => theme.fg("muted", text.replace("commands", this.noMatchReplacement)),
     };
 
     this.addChild(new DynamicBorder((text) => theme.fg("border", text)));
     this.addChild(new Spacer(1));
-    this.addChild(new Text(theme.fg("accent", "Choose a model"), 0, 0));
+    this.addChild(new Text(theme.fg("accent", options.title ?? "Choose a model"), 0, 0));
     this.addChild(new Text(theme.fg("muted", "Type to search · ↑/↓ to scroll · Enter to select · Esc to cancel"), 0, 0));
     this.addChild(new Spacer(1));
     this.addChild(new Text(theme.fg("muted", "Filter:"), 0, 0));
@@ -480,6 +500,7 @@ class ScrollableModelPicker extends Container {
     this.addChild(new Spacer(1));
     this.addChild(new DynamicBorder((text) => theme.fg("border", text)));
     this.list = new SelectList(items, 10, this.listTheme, { maxPrimaryColumnWidth: 56 });
+    this.list.setSelectedIndex(this.selectedIndex);
     this.list.onSelect = (item) => this.done(item.value);
     this.list.onCancel = () => this.done(undefined);
     this.listContainer.addChild(this.list);
@@ -530,29 +551,87 @@ class ScrollableModelPicker extends Container {
   }
 }
 
-async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undefined> {
-  const models = ctx.modelRegistry.getAvailable();
+function preferredModelId(agentModel: string | undefined, currentModel: Model<any> | undefined): string | undefined {
+  return agentModel ?? (currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined);
+}
+
+function modelPickerItems(models: Model<any>[], preferredModel?: string): SelectItem[] {
+  const availableIds = new Set(models.map((model) => `${model.provider}/${model.id}`));
   const items: SelectItem[] = models.map((model) => {
     const id = `${model.provider}/${model.id}`;
     const context = model.contextWindow ? ` · ${model.contextWindow.toLocaleString()} ctx` : "";
     return { value: id, label: id, description: `${model.name}${context}` };
   });
+  if (preferredModel && parseModelId(preferredModel) && !availableIds.has(preferredModel)) {
+    items.unshift({
+      value: preferredModel,
+      label: preferredModel,
+      description: "Current agent or parent model · not in Pi's available-model list",
+    });
+  }
   items.push({
     value: MANUAL_MODEL_ID,
     label: "Enter provider/model ID manually",
     description: "Use an ID not listed in Pi",
   });
+  return items;
+}
 
+function getPiXhighSupport(): ((model: Model<any>) => boolean) | undefined {
+  const helper = (piAi as unknown as { supportsXhigh?: unknown }).supportsXhigh;
+  return typeof helper === "function" ? helper as (model: Model<any>) => boolean : undefined;
+}
+
+function thinkingLevelsForModel(
+  model?: Model<any>,
+  xhighSupport: ((model: Model<any>) => boolean) | null = getPiXhighSupport(),
+): ThinkingLevel[] {
+  if (!model) return [...THINKING_LEVELS];
+  if (!model.reasoning) return ["off"];
+  return xhighSupport?.(model) ? [...THINKING_LEVELS] : THINKING_LEVELS.slice(0, -1);
+}
+
+function thinkingPickerItems(
+  model: Model<any> | undefined,
+  savedThinking?: string,
+): { items: SelectItem[]; initialValue: string } {
+  const levels = thinkingLevelsForModel(model);
+  const initialValue = savedThinking && levels.includes(savedThinking as ThinkingLevel)
+    ? savedThinking
+    : PI_DEFAULT_THINKING;
+  const savedLevelNote = savedThinking && initialValue === PI_DEFAULT_THINKING
+    ? `Saved level ${savedThinking} is unavailable for this model`
+    : "Leave thinking unset so Pi uses its configured default";
+  return {
+    initialValue,
+    items: [
+      { value: PI_DEFAULT_THINKING, label: "Pi default / unset", description: savedLevelNote },
+      ...levels.map((level) => ({ value: level, label: level, description: "Thinking level" })),
+    ],
+  };
+}
+
+async function chooseModel(ctx: ExtensionCommandContext, preferredModel?: string): Promise<string | undefined> {
+  const models = ctx.modelRegistry.getAvailable();
+  const items = modelPickerItems(models, preferredModel);
   const selected = await ctx.ui.custom<string | undefined>(
-    (tui, theme, keybindings, done) => new ScrollableModelPicker(tui, theme, keybindings, items, done),
+    (tui, theme, keybindings, done) => new ScrollableModelPicker(tui, theme, keybindings, items, done, {
+      title: "Choose a model",
+      initialValue: preferredModel,
+    }),
   );
   if (!selected) return undefined;
-  if (selected !== MANUAL_MODEL_ID) return selected;
+  if (selected !== MANUAL_MODEL_ID) {
+    const availableIds = new Set(models.map((model) => `${model.provider}/${model.id}`));
+    if (!availableIds.has(selected)) {
+      ctx.ui.notify(`Model ${selected} is not currently available in Pi; it will be attempted and may fail.`, "warning");
+    }
+    return selected;
+  }
 
   const entered = (await ctx.ui.input("Enter provider/model ID"))?.trim();
   if (!entered) return undefined;
-  const parsed = parseModelId(entered);
-  if (!parsed) {
+  if (!parseModelId(entered)) {
     ctx.ui.notify("Enter a model ID in provider/model format.", "error");
     return undefined;
   }
@@ -563,7 +642,25 @@ async function chooseModel(ctx: ExtensionCommandContext): Promise<string | undef
   return entered;
 }
 
-function updateAgentModel(content: string, modelId: string): string | undefined {
+async function chooseThinking(
+  ctx: ExtensionCommandContext,
+  modelId: string,
+  savedThinking?: string,
+): Promise<ThinkingLevel | null | undefined> {
+  const model = ctx.modelRegistry.getAvailable().find((candidate) => `${candidate.provider}/${candidate.id}` === modelId);
+  const { items, initialValue } = thinkingPickerItems(model, savedThinking);
+  const selected = await ctx.ui.custom<string | undefined>(
+    (tui, theme, keybindings, done) => new ScrollableModelPicker(tui, theme, keybindings, items, done, {
+      title: `Choose a thinking level for ${modelId}`,
+      initialValue,
+      noMatchReplacement: "thinking levels",
+    }),
+  );
+  if (selected === undefined) return undefined;
+  return selected === PI_DEFAULT_THINKING ? null : selected as ThinkingLevel;
+}
+
+function updateAgentDefaults(content: string, modelId: string, thinking: ThinkingLevel | null): string | undefined {
   const match = /^---(\r?\n)([\s\S]*?)\r?\n---/.exec(content);
   if (!match) return undefined;
   const newline = match[1];
@@ -572,21 +669,37 @@ function updateAgentModel(content: string, modelId: string): string | undefined 
   const modelLine = lines.findIndex((line) => /^model\s*:/.test(line));
   if (modelLine === -1) lines.push(`model: ${modelId}`);
   else lines[modelLine] = `model: ${modelId}`;
+
+  const thinkingLine = lines.findIndex((line) => /^thinking\s*:/.test(line));
+  if (thinking === null) {
+    if (thinkingLine !== -1) lines.splice(thinkingLine, 1);
+  } else if (thinkingLine === -1) {
+    lines.push(`thinking: ${thinking}`);
+  } else {
+    lines[thinkingLine] = `thinking: ${thinking}`;
+  }
   return content.replace(match[0], `---${newline}${lines.join(newline)}${newline}---`);
 }
 
-function saveAgentModel(agentName: string, modelId: string, scope: "project" | "global", cwd: string): void {
+function saveAgentDefaults(
+  agentName: string,
+  modelId: string,
+  thinking: ThinkingLevel | null,
+  scope: "project" | "global",
+  cwd: string,
+): void {
   if (!agentName || agentName === "." || agentName === ".." || agentName.includes("/") || agentName.includes("\\") || agentName.includes("\0")) {
     throw new Error("Invalid agent name");
   }
   if (!parseModelId(modelId)) throw new Error("Invalid model ID");
+  if (thinking !== null && !THINKING_LEVELS.includes(thinking)) throw new Error("Invalid thinking level");
 
   const paths = agentDefinitionPaths(agentName, cwd);
   const target = scope === "project" ? paths[0] : paths[1];
   const source = paths.find(existsSync);
   if (!source) throw new Error(`Agent definition not found: ${agentName}`);
   const content = readFileSync(existsSync(target) ? target : source, "utf8");
-  const updated = updateAgentModel(content, modelId);
+  const updated = updateAgentDefaults(content, modelId, thinking);
   if (!updated) throw new Error(`Agent definition has invalid frontmatter: ${agentName}`);
 
   mkdirSync(dirname(target), { recursive: true });
@@ -1041,8 +1154,8 @@ function buildSubagentToolAllowlist(
 }
 
 /**
- * Apply a loadout snapshot's sandbox to a pi command's `parts` array: model,
- * identity (system prompt), and the default-deny tool/extension restriction
+ * Apply a loadout snapshot's sandbox to a pi command's `parts` array: model and
+ * thinking level, identity (system prompt), and the default-deny tool/extension restriction
  * (`--no-extensions` + `--tools` + one `-e` per tool-backing extension).
  *
  * This is the single source of truth for reconstructing a subagent's sandbox,
@@ -1059,6 +1172,8 @@ function applySandboxToParts(
   if (loadout.model) {
     const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
     parts.push("--model", shellEscape(model));
+  } else if (loadout.thinking) {
+    parts.push("--thinking", shellEscape(loadout.thinking));
   }
 
   if (loadout.identity) {
@@ -1343,6 +1458,11 @@ export const __test__ = {
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
   loadAgentDefaults,
+  preferredModelId,
+  modelPickerItems,
+  thinkingLevelsForModel,
+  thinkingPickerItems,
+  updateAgentDefaults,
   resolveFallbackModel,
   watchSubagentWithFallback,
   discoverAgentDefinitions,
@@ -1403,7 +1523,7 @@ async function launchSubagent(
     : resolveFallbackModel(agentDefs?.fallbackModel, ctx.model, effectiveModel);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
-  const effectiveThinking = agentDefs?.thinking;
+  const effectiveThinking = params.thinking !== undefined ? params.thinking : agentDefs?.thinking ?? null;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
@@ -1581,7 +1701,7 @@ async function launchSubagent(
   };
   writeSubagentLoadout(subagentSessionFile, loadout);
 
-  // Apply model, identity, and the default-deny tool/extension restriction via
+  // Apply model/thinking, identity, and the default-deny tool/extension restriction via
   // the shared helper (same code path resume uses — they can't drift).
   applySandboxToParts(parts, loadout, { artifactDir, name: params.name });
 
@@ -2600,9 +2720,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
     });
 
-  // /subagents command — interactively spawn an agent or change its model default
+  // /subagents command — interactively spawn an agent or change its model/thinking defaults
   pi.registerCommand("subagents", {
-    description: "Choose a model and manage subagent defaults",
+    description: "Choose a model and thinking level, or manage subagent defaults",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/subagents requires interactive mode", "error");
@@ -2621,8 +2741,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       const action = await ctx.ui.select("Choose an action", ["Spawn once", "Change default"]);
       if (!action) return;
-      const modelId = await chooseModel(ctx);
+      const modelId = await chooseModel(ctx, preferredModelId(agent.model, ctx.model));
       if (!modelId) return;
+      const thinking = await chooseThinking(ctx, modelId, agent.thinking);
+      if (thinking === undefined) return;
 
       if (action === "Change default") {
         const scope = await ctx.ui.select("Save this default where?", ["Project-local", "Global"]);
@@ -2638,18 +2760,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           if (conflict === "Switch to project-local") targetScope = "project";
         }
         try {
-          saveAgentModel(agent.name, modelId, targetScope, ctx.cwd);
-          ctx.ui.notify(`Saved ${modelId} as the ${targetScope}-local default for ${agent.name}.`, "info");
+          saveAgentDefaults(agent.name, modelId, thinking, targetScope, ctx.cwd);
+          const thinkingLabel = thinking ?? "Pi default";
+          ctx.ui.notify(`Saved ${modelId} (${thinkingLabel}) as the ${targetScope}-local defaults for ${agent.name}.`, "info");
         } catch (error) {
           ctx.ui.notify(`Could not save model default: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
         return;
       }
 
-      const task = (await ctx.ui.input(`Task — model selected: ${modelId}`))?.trim();
+      const thinkingLabel = thinking ?? "Pi default";
+      const task = (await ctx.ui.input(`Task — model: ${modelId} · thinking: ${thinkingLabel}`))?.trim();
       if (!task) return;
       pi.sendUserMessage(
-        `Use the subagent tool with these exact parameters: ${JSON.stringify({ agent: agent.name, model: modelId, task })}`,
+        `Use the subagent tool with these exact parameters: ${JSON.stringify({ agent: agent.name, model: modelId, thinking, task })}`,
       );
     },
   });

@@ -102,7 +102,7 @@ export interface SubagentLoadout {
   model: string | null;
   /** Where the model came from, for active-subagent status; optional for older snapshots. */
   modelSource?: "spawn override" | "agent default" | "Pi default" | "Pi default fallback" | "CLI default";
-  /** Thinking level appended to the model as `model:level`, or null. */
+  /** Explicit thinking level used at launch, or null to leave it to Pi's configured default. */
   thinking: string | null;
   /** How the identity text was applied: append/replace, or null. */
   systemPromptMode: "append" | "replace" | null;

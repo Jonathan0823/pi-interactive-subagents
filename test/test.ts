@@ -80,7 +80,8 @@ function withTempDir(run: (dir: string) => void) {
   }
 }
 
-function chooseFromCustomModelPicker(index = 0) {
+function chooseFromCustomModelPicker(index: number | number[] = 0) {
+  let callIndex = 0;
   return async (factory: any, options?: { overlay?: boolean }) => {
     assert.notEqual(options?.overlay, true, "the model picker should replace the input, not open as an overlay");
     let selected: string | undefined;
@@ -97,7 +98,9 @@ function chooseFromCustomModelPicker(index = 0) {
       (value: string | undefined) => { selected = value; },
     );
     component.render(120);
-    for (let i = 0; i < index; i++) component.handleInput("DOWN");
+    const moves = Array.isArray(index) ? index[callIndex] ?? 0 : index;
+    callIndex++;
+    for (let i = 0; i < Math.abs(moves); i++) component.handleInput(moves < 0 ? "UP" : "DOWN");
     component.handleInput("ENTER");
     return selected;
   };
@@ -1409,6 +1412,27 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("applySandboxToParts passes an explicit thinking level when no model override is present", () => {
+    const parts: string[] = [];
+    testApi.applySandboxToParts(
+      parts,
+      {
+        agent: "worker",
+        toolAllowlist: null,
+        model: null,
+        thinking: "high",
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      },
+      { artifactDir: process.cwd(), name: "worker" },
+    );
+    assert.deepEqual(parts, ["--thinking", "'high'"]);
+  });
+
   it("applySandboxToParts omits restriction flags when the loadout was unrestricted", () => {
     withTempDir((d) => {
       const parts: string[] = [];
@@ -1932,6 +1956,44 @@ describe("commands", () => {
     assert.match(visible, /\(11\/16\)/);
     picker.handleInput("ENTER");
     assert.equal(selected, "provider-10/model-10");
+
+    let preselected: string | undefined;
+    const savedModelPicker = new testApi.ScrollableModelPicker(
+      { requestRender() {} },
+      { fg: (_color: string, text: string) => text },
+      { matches: (data: string, action: string) => data === actions[action] },
+      items,
+      (value: string | undefined) => { preselected = value; },
+      { initialValue: "provider-10/model-10", title: "Choose a model" },
+    );
+    savedModelPicker.handleInput("ENTER");
+    assert.equal(preselected, "provider-10/model-10");
+  });
+
+  it("filters thinking choices by model capabilities and includes all levels for unknown models", () => {
+    const testApi = (subagentsModule as any).__test__;
+    assert.deepEqual(testApi.thinkingLevelsForModel(undefined), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "unknown", reasoning: false }), ["off"]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-4o", reasoning: true }), ["off", "minimal", "low", "medium", "high"]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }, null), ["off", "minimal", "low", "medium", "high"]);
+    const selectedModel = { provider: "openai", id: "parent", name: "Parent", contextWindow: 32_000 } as any;
+    assert.equal(testApi.preferredModelId(undefined, selectedModel), "openai/parent");
+    const pickerItems = testApi.modelPickerItems([selectedModel], "custom/provider/model");
+    assert.equal(pickerItems[0].value, "custom/provider/model");
+    assert.equal(testApi.thinkingPickerItems({ id: "gpt-4o", reasoning: true }, "xhigh").initialValue, "__pi_default_thinking__");
+    assert.equal(testApi.thinkingPickerItems({ id: "gpt-4o", reasoning: true }, "high").initialValue, "high");
+  });
+
+  it("saves a Pi-default thinking choice by removing its frontmatter field", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const content = "---\nname: test-agent\nmodel: openai/old\nthinking: high\ntools: read\n---\nAgent body\n";
+    const updated = testApi.updateAgentDefaults(content, "openai/new", null);
+    assert.ok(updated);
+    assert.match(updated, /model: openai\/new/);
+    assert.doesNotMatch(updated, /thinking:/);
+    assert.match(updated, /tools: read/);
+    assert.match(updated, /Agent body/);
   });
 
   it("/subagents lets the user choose a model for one spawn", async () => {
@@ -1940,13 +2002,13 @@ describe("commands", () => {
     const command = registeredCommands.find((entry) => entry.name === "subagents");
     assert.ok(command, "expected /subagents to be registered");
 
-    const models = [{ provider: "anthropic", id: "claude-test", name: "Claude Test", contextWindow: 200_000 }];
+    const models = [{ provider: "anthropic", id: "claude-test", name: "Claude Test", contextWindow: 200_000, reasoning: true }];
     const commandCtx = {
       cwd: process.cwd(),
       mode: "tui",
       modelRegistry: { getAvailable: () => models },
       ui: {
-        custom: chooseFromCustomModelPicker(),
+        custom: chooseFromCustomModelPicker(1),
         select: async (title: string, options: string[]) => {
           if (title === "Choose an agent") return options.find((option) => option === "scout");
           if (title === "Choose an action") return options.find((option) => option === "Spawn once");
@@ -1969,6 +2031,81 @@ describe("commands", () => {
     assert.match(sentUserMessages[0], /inspect model selection/);
   });
 
+  it("/subagents preselects saved model and thinking for a one-off spawn", async () => {
+    const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    const dir = createTestDir();
+    const agentsDir = join(dir, ".pi", "agents");
+    writeAgentFile(agentsDir, "picker-agent", "name: picker-agent\nmodel: openai/saved\nthinking: high");
+    const models = [
+      { provider: "openai", id: "other", name: "Other", contextWindow: 16_000, reasoning: true },
+      { provider: "openai", id: "saved", name: "Saved", contextWindow: 32_000, reasoning: true },
+    ];
+
+    try {
+      await command.handler("", {
+        cwd: dir,
+        mode: "tui",
+        modelRegistry: { getAvailable: () => models },
+        ui: {
+          custom: chooseFromCustomModelPicker(),
+          select: async (title: string, options: string[]) => {
+            if (title === "Choose an agent") return options.find((option) => option === "picker-agent");
+            if (title === "Choose an action") return options.find((option) => option === "Spawn once");
+            return undefined;
+          },
+          input: async () => "inspect saved defaults",
+          notify() {},
+        },
+      });
+
+      assert.equal(sentUserMessages.length, 1);
+      assert.ok(sentUserMessages[0].includes('"model":"openai/saved"'));
+      assert.match(sentUserMessages[0], /"thinking":"high"/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("/subagents preselects the parent model and Pi default when the agent has no defaults", async () => {
+    const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    const dir = createTestDir();
+    const agentsDir = join(dir, ".pi", "agents");
+    writeAgentFile(agentsDir, "picker-agent", "name: picker-agent");
+    const models = [
+      { provider: "openai", id: "other", name: "Other", contextWindow: 16_000, reasoning: true },
+      { provider: "openai", id: "parent", name: "Parent", contextWindow: 32_000, reasoning: true },
+    ];
+
+    try {
+      await command.handler("", {
+        cwd: dir,
+        mode: "tui",
+        model: models[1],
+        modelRegistry: { getAvailable: () => models },
+        ui: {
+          custom: chooseFromCustomModelPicker(),
+          select: async (title: string, options: string[]) => {
+            if (title === "Choose an agent") return options.find((option) => option === "picker-agent");
+            if (title === "Choose an action") return options.find((option) => option === "Spawn once");
+            return undefined;
+          },
+          input: async () => "inspect parent defaults",
+          notify() {},
+        },
+      });
+
+      assert.equal(sentUserMessages.length, 1);
+      assert.ok(sentUserMessages[0].includes('"model":"openai/parent"'));
+      assert.ok(sentUserMessages[0].includes('"thinking":null'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("/subagents accepts an unlisted manual model ID with a warning", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
     (subagentsModule as any).default(api);
@@ -1987,6 +2124,7 @@ describe("commands", () => {
           if (title === "Choose a model") return options.find((option) => option.includes("manually"));
           return undefined;
         },
+        custom: chooseFromCustomModelPicker(1),
         input: async (title: string) => title === "Enter provider/model ID" ? "custom/provider/model" : "inspect",
         notify(message: string, level: string) { notices.push({ message, level }); },
       },
@@ -2015,6 +2153,7 @@ describe("commands", () => {
           if (title === "Choose a model") return options.find((option) => option.includes("manually"));
           return undefined;
         },
+        custom: chooseFromCustomModelPicker(1),
         input: async (title: string) => title === "Enter provider/model ID" ? "missing-provider" : undefined,
         notify(message: string, level: string) { notices.push({ message, level }); },
       },
@@ -2037,9 +2176,9 @@ describe("commands", () => {
       await command.handler("", {
         cwd: dir,
         mode: "tui",
-        modelRegistry: { getAvailable: () => [{ provider: "openai", id: "new", name: "New", contextWindow: 16_000 }] },
+        modelRegistry: { getAvailable: () => [{ provider: "openai", id: "new", name: "New", contextWindow: 16_000, reasoning: true }] },
         ui: {
-          custom: chooseFromCustomModelPicker(),
+          custom: chooseFromCustomModelPicker(1),
           select: async (title: string, options: string[]) => {
             selections.push({ title, options });
             if (title === "Choose an agent") return options.find((option) => option === "project-agent");
@@ -2072,8 +2211,8 @@ describe("commands", () => {
     const command = registeredCommands.find((entry) => entry.name === "subagents");
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
-    writeAgentFile(projectAgents, "local-agent", "name: local-agent\ntools: read, write\nsystem-prompt: append");
-    const model = { provider: "openai", id: "model-test", name: "Test Model", contextWindow: 32_000 };
+    writeAgentFile(projectAgents, "local-agent", "name: local-agent\nmodel: openai/model-test\nthinking: low\ntools: read, write\nsystem-prompt: append");
+    const model = { provider: "openai", id: "model-test", name: "Test Model", contextWindow: 32_000, reasoning: true };
 
     try {
       await command.handler("", {
@@ -2081,7 +2220,7 @@ describe("commands", () => {
         mode: "tui",
         modelRegistry: { getAvailable: () => [model] },
         ui: {
-          custom: chooseFromCustomModelPicker(),
+          custom: chooseFromCustomModelPicker([0, 1]),
           select: async (title: string, options: string[]) => {
             if (title === "Choose an agent") return options.find((option) => option === "local-agent");
             if (title === "Choose an action") return options.find((option) => option === "Change default");
@@ -2096,9 +2235,45 @@ describe("commands", () => {
 
       const saved = readFileSync(join(projectAgents, "local-agent.md"), "utf8");
       assert.match(saved, /model: openai\/model-test/);
+      assert.match(saved, /thinking: medium/);
       assert.match(saved, /tools: read, write/);
       assert.match(saved, /system-prompt: append/);
       assert.match(saved, /You are a test agent\./);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("/subagents removes a saved thinking field when Pi default is saved", async () => {
+    const { api, registeredCommands } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    const dir = createTestDir();
+    const projectAgents = join(dir, ".pi", "agents");
+    writeAgentFile(projectAgents, "local-agent", "name: local-agent\nmodel: openai/model-test\nthinking: high");
+    const model = { provider: "openai", id: "model-test", name: "Test Model", contextWindow: 32_000, reasoning: true };
+
+    try {
+      await command.handler("", {
+        cwd: dir,
+        mode: "tui",
+        modelRegistry: { getAvailable: () => [model] },
+        ui: {
+          custom: chooseFromCustomModelPicker([0, 1]),
+          select: async (title: string, options: string[]) => {
+            if (title === "Choose an agent") return options.find((option) => option === "local-agent");
+            if (title === "Choose an action") return options.find((option) => option === "Change default");
+            if (title === "Save this default where?") return options.find((option) => option === "Project-local");
+            return undefined;
+          },
+          input: async () => undefined,
+          notify() {},
+        },
+      });
+
+      const saved = readFileSync(join(projectAgents, "local-agent.md"), "utf8");
+      assert.ok(saved.includes("model: openai/model-test"));
+      assert.doesNotMatch(saved, /^thinking:/m);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2183,7 +2358,7 @@ describe("tool registration", () => {
     assert.match(result.content[0].text, /not a known agent/i);
   });
 
-  it("exposes a debloated schema: agent+task required, name/model/cwd optional, no override knobs", () => {
+  it("exposes a debloated schema with an optional model and thinking override", () => {
     const { api, registeredTools } = createMockExtensionApi();
     (subagentsModule as any).default(api);
 
@@ -2193,8 +2368,8 @@ describe("tool registration", () => {
     const props = subagentTool.parameters.properties;
     assert.deepEqual(
       Object.keys(props).sort(),
-      ["agent", "cwd", "model", "name", "task"],
-      "only agent/task/name/model/cwd should remain",
+      ["agent", "cwd", "model", "name", "task", "thinking"],
+      "only agent/task/name/model/cwd/thinking should remain",
     );
     assert.deepEqual(
       [...(subagentTool.parameters.required ?? [])].sort(),
