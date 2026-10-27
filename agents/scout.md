@@ -3,6 +3,7 @@ name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
 tools: read, grep, find, ls
 model: openrouter/z-ai/glm-5.3
+fallback-model: pi-default
 thinking: low
 system-prompt: append
 auto-exit: true

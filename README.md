@@ -80,7 +80,7 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 | **researcher** | `openrouter/z-ai/glm-5.3` | `web_search`, `web_fetch`, `safe_bash` | Web research, synthesized into a sourced brief |
 | **worker** | `openrouter/z-ai/glm-5.3` | `read`, `write`, `edit`, `bash`, `web_search`, `web_fetch` + spawning | General implementer; may spawn `scout` and `researcher` |
 
-All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
+All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`). They also set `fallback-model: pi-default`: if the configured model ends with a provider/agent error, the extension retries once with the parent session's currently selected model.
 
 ## Custom agents
 
@@ -107,6 +107,7 @@ You are a specialized agent that does X...
 | `name` | string | Agent name (used in `agent: "my-agent"`) |
 | `description` | string | Shown in `subagents_list` |
 | `model` | string | Default model |
+| `fallback-model` | `pi-default` | Retry once with the parent session's current model after a provider/agent error. Pi CLI agents only; no retry if the parent model is unavailable or identical to the primary model |
 | `thinking` | string | `minimal`, `low`, `medium`, or `high` |
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `web_fetch`, `safe_bash`, `video_extract`, `youtube_search`, `google_image_search`. Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |

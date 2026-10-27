@@ -287,6 +287,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     name: getFrontmatterValue(frontmatter, "name") ?? fallbackName,
     description: getFrontmatterValue(frontmatter, "description"),
     model: getFrontmatterValue(frontmatter, "model"),
+    fallbackModel: getFrontmatterValue(frontmatter, "fallback-model") === "pi-default" ? "pi-default" : undefined,
     tools: getFrontmatterValue(frontmatter, "tools"),
     systemPromptMode:
       systemPromptMode === "replace"
@@ -1342,6 +1343,8 @@ export const __test__ = {
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
   loadAgentDefaults,
+  resolveFallbackModel,
+  watchSubagentWithFallback,
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
@@ -1869,6 +1872,42 @@ async function watchSubagent(
   }
 }
 
+async function watchSubagentWithFallback(
+  running: RunningSubagent,
+  signal: AbortSignal,
+  retry: (model: string) => Promise<RunningSubagent>,
+  watch: typeof watchSubagent = watchSubagent,
+): Promise<SubagentResult> {
+  const firstResult = await watch(running, signal);
+  const fallbackModel = running.fallbackModel;
+  if (!fallbackModel || !firstResult.errorMessage || signal.aborted) return firstResult;
+
+  // Keep the child count non-zero while replacing the failed process so an
+  // autonomous parent is not allowed to exit during the short relaunch gap.
+  runningSubagents.set(running.id, running);
+  let fallback: RunningSubagent;
+  try {
+    fallback = await retry(fallbackModel);
+    runningSubagents.delete(running.id);
+    fallback.abortController = running.abortController;
+    updateWidget();
+    const result = await watch(fallback, signal);
+    const retrySummary = `Configured model ${running.model ?? "(agent default)"} failed; retried with Pi default ${fallbackModel}.`;
+    return {
+      ...result,
+      summary: `${retrySummary}\n\n${result.summary}`,
+    };
+  } catch (error) {
+    runningSubagents.delete(running.id);
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...firstResult,
+      summary: `${firstResult.summary}\n\nPi-default fallback launch failed: ${message}`,
+      errorMessage: `${firstResult.errorMessage}; fallback launch failed: ${message}`,
+    };
+  }
+}
+
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
   // Capture the UI context for widget updates
@@ -2053,7 +2092,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         startStatusRefresh(pi);
 
         // Fire-and-forget: start watching in background
-        watchSubagent(running, watcherAbort.signal)
+        watchSubagentWithFallback(running, watcherAbort.signal, async (fallbackModel) => {
+          const fallback = await launchSubagent(
+            { ...params, model: fallbackModel },
+            ctx,
+            { modelSource: "Pi default fallback" },
+          );
+          registerName(parentArtifactDir, fallback.name, {
+            sessionFile: fallback.sessionFile,
+            sessionId: getSessionId(fallback.sessionFile),
+          });
+          return fallback;
+        })
           .then((result) => {
             updateWidget(); // reflect removal from Map immediately
 

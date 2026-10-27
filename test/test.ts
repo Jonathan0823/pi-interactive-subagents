@@ -1091,6 +1091,68 @@ describe("status.ts", () => {
 describe("subagent discovery", () => {
   const testApi = (subagentsModule as any).__test__;
 
+  it("loads the Pi-default fallback setting from agent frontmatter", () => {
+    const dir = createTestDir();
+    const agentsDir = join(dir, ".pi", "agents");
+    writeAgentFile(agentsDir, "fallback-agent", ["name: fallback-agent", "fallback-model: pi-default"].join("\n"));
+    try {
+      const loaded = testApi.loadAgentDefaults("fallback-agent", dir);
+      assert.equal(loaded?.fallbackModel, "pi-default");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the parent model as a distinct fallback only when configured", () => {
+    const resolve = testApi.resolveFallbackModel;
+    const parent = { provider: "openai", id: "current-model" };
+    assert.equal(resolve("pi-default", parent, "anthropic/preferred"), "openai/current-model");
+    assert.equal(resolve(undefined, parent, "anthropic/preferred"), undefined);
+    assert.equal(resolve("pi-default", undefined, "anthropic/preferred"), undefined);
+    assert.equal(resolve("pi-default", parent, "openai/current-model"), undefined);
+  });
+
+  it("retries a failed configured model once with Pi default", async () => {
+    const controller = new AbortController();
+    const primary: any = {
+      id: "primary",
+      name: "fallback-agent",
+      task: "do work",
+      model: "anthropic/preferred",
+      fallbackModel: "openai/current-model",
+      abortController: controller,
+    };
+    const fallback: any = {
+      ...primary,
+      id: "fallback",
+      model: "openai/current-model",
+      modelSource: "Pi default fallback",
+      fallbackModel: undefined,
+    };
+    const watched: any[] = [];
+    const results = [
+      { name: primary.name, task: primary.task, summary: "provider error", exitCode: 1, elapsed: 1, errorMessage: "402 credits" },
+      { name: fallback.name, task: fallback.task, summary: "completed", exitCode: 0, elapsed: 2 },
+    ];
+
+    const result = await testApi.watchSubagentWithFallback(
+      primary,
+      controller.signal,
+      async (model: string) => {
+        assert.equal(model, "openai/current-model");
+        return fallback;
+      },
+      async (running: any) => {
+        watched.push(running.id);
+        return results.shift();
+      },
+    );
+
+    assert.deepEqual(watched, ["primary", "fallback"]);
+    assert.equal(result.exitCode, 0);
+    assert.match(result.summary, /retried with Pi default openai\/current-model/);
+  });
+
   it("loads session-mode from frontmatter", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
@@ -1199,6 +1261,7 @@ describe("subagent discovery", () => {
     for (const name of ["scout", "researcher", "worker"]) {
       const defs = testApi.loadAgentDefaults(name);
       assert.ok(defs, `expected bundled agent ${name} to be discoverable`);
+      assert.equal(defs.fallbackModel, "pi-default", `${name} should retry with the Pi default model`);
       assert.equal(
         testApi.resolveEffectiveInteractive({ name, task: "" }, defs),
         false,
