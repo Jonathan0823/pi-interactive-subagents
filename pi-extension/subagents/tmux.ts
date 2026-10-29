@@ -182,11 +182,7 @@ export function sendLongCommand(
 ): string {
   const scriptPath =
     options?.scriptPath ??
-    join(
-      tmpdir(),
-      "pi-subagent-scripts",
-      `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`,
-    );
+    join(tmpdir(), "pi-subagent-scripts", `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`);
   mkdirSync(dirname(scriptPath), { recursive: true });
 
   const scriptParts = ["#!/bin/bash"];
@@ -207,13 +203,9 @@ export function sendLongCommand(
  */
 export function readScreen(surface: string, lines = 50): string {
   requireTmux();
-  return execFileSync(
-    "tmux",
-    ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
-    {
-      encoding: "utf8",
-    },
-  );
+  return execFileSync("tmux", ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`], {
+    encoding: "utf8",
+  });
 }
 
 /**

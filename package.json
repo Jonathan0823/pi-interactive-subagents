@@ -13,6 +13,9 @@
   },
   "type": "module",
   "scripts": {
+    "format:check": "biome format agents pi-extension test",
+    "lint": "biome lint agents pi-extension test",
+    "build": "tsc --noEmit --noCheck",
     "test": "node --test test/test.ts",
     "test:loadout:cli": "node --test test/integration/explicit-loadout-cli.test.ts",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts"
@@ -28,8 +31,11 @@
     ]
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.6.4",
     "@mariozechner/pi-coding-agent": "^0.65.0",
     "@mariozechner/pi-tui": "^0.65.0",
-    "@sinclair/typebox": "^0.34.49"
+    "@sinclair/typebox": "^0.34.49",
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
   }
 }

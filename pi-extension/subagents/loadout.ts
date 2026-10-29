@@ -55,7 +55,11 @@ function stableSerialize(value: unknown): string {
 }
 
 export function fingerprintToolContract(tool: { name: string; description: string; parameters: unknown }): string {
-  const contract = stableSerialize({ name: tool.name, description: tool.description, parameters: tool.parameters });
+  const contract = stableSerialize({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  });
   return createHash("sha256").update(contract).digest("hex");
 }
 
@@ -152,7 +156,8 @@ export function resolveExplicitLoadout(
           : `Ambiguous extension reference "${name}".`,
       );
     }
-    if (matches[0].path.startsWith("builtin:")) return { ...matches[0], identity: matches[0].identity ?? matches[0].path };
+    if (matches[0].path.startsWith("builtin:"))
+      return { ...matches[0], identity: matches[0].identity ?? matches[0].path };
     if (!matches[0].identity || matches[0].identity.trim() !== matches[0].identity) {
       throw new Error(`Registered extension "${name}" has no trusted registration identity.`);
     }
@@ -287,7 +292,10 @@ export function authorizeToolCall(
     !grant.contractFingerprint ||
     matches[0].contractFingerprint !== grant.contractFingerprint
   ) {
-    return { allowed: false, reason: `Tool "${name}" provider or contract changed, or is ambiguous.` };
+    return {
+      allowed: false,
+      reason: `Tool "${name}" provider or contract changed, or is ambiguous.`,
+    };
   }
   return { allowed: true };
 }

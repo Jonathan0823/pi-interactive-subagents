@@ -74,8 +74,7 @@ export function seedSubagentSessionFile(params: {
     cwd: params.childCwd,
     parentSession: params.parentSessionFile,
   };
-  const contentLines =
-    params.mode === "fork" ? getForkContentLines(params.parentSessionFile) : [];
+  const contentLines = params.mode === "fork" ? getForkContentLines(params.parentSessionFile) : [];
   const lines = [JSON.stringify(header), ...contentLines];
 
   mkdirSync(dirname(params.childSessionFile), { recursive: true });
@@ -196,11 +195,7 @@ export function readNameRegistry(artifactDir: string): NameRegistry {
  * Writes atomically (temp file + rename) so a concurrent reader never sees a
  * partial registry.
  */
-export function registerName(
-  artifactDir: string,
-  name: string,
-  entry: NameRegistryEntry,
-): void {
+export function registerName(artifactDir: string, name: string, entry: NameRegistryEntry): void {
   try {
     mkdirSync(artifactDir, { recursive: true });
     const registry = readNameRegistry(artifactDir);
@@ -216,10 +211,7 @@ export function registerName(
 }
 
 /** Resolve a name to its registry entry within a spawner session, or null. */
-export function resolveNameInRegistry(
-  artifactDir: string,
-  name: string,
-): NameRegistryEntry | null {
+export function resolveNameInRegistry(artifactDir: string, name: string): NameRegistryEntry | null {
   const entry = readNameRegistry(artifactDir)[name];
   return entry && typeof entry.sessionFile === "string" ? entry : null;
 }
@@ -427,10 +419,7 @@ function lookupSessionIndex(
  * keeps the event loop responsive. The heavy work only happens on the first
  * resolution per process (and incrementally thereafter); warm lookups are ~50ms.
  */
-export async function resolveSessionFileByIdAsync(
-  sessionId: string,
-  sessionsRoot: string,
-): Promise<string | null> {
+export async function resolveSessionFileByIdAsync(sessionId: string, sessionsRoot: string): Promise<string | null> {
   if (!sessionId || !existsSync(sessionsRoot)) return null;
   // Let the event loop breathe (and the UI repaint) before the sync scan.
   await new Promise<void>((r) => setImmediate(r));
@@ -490,21 +479,14 @@ export function findLastAssistantMessage(entries: SessionEntry[]): string | null
     if (msg.message.role !== "assistant") continue;
 
     const texts = msg.message.content
-      .filter(
-        (block) =>
-          block.type === "text" && typeof block.text === "string" && block.text.trim() !== "",
-      )
+      .filter((block) => block.type === "text" && typeof block.text === "string" && block.text.trim() !== "")
       .map((block) => block.text as string);
 
     if (texts.length > 0 && texts.join("").trim()) return texts.join("\n");
 
     const stopReason = (msg.message as { stopReason?: unknown }).stopReason;
     const errorMessage = (msg.message as { errorMessage?: unknown }).errorMessage;
-    if (
-      stopReason === "error" &&
-      typeof errorMessage === "string" &&
-      errorMessage.trim() !== ""
-    ) {
+    if (stopReason === "error" && typeof errorMessage === "string" && errorMessage.trim() !== "") {
       return `Subagent error: ${errorMessage.trim()}`;
     }
   }
@@ -549,11 +531,7 @@ export function copySessionFile(sessionFile: string, destDir: string): string {
  * Read new entries from sourceFile (after afterLine), append them to targetFile.
  * Returns the appended entries.
  */
-export function mergeNewEntries(
-  sourceFile: string,
-  targetFile: string,
-  afterLine: number,
-): SessionEntry[] {
+export function mergeNewEntries(sourceFile: string, targetFile: string, afterLine: number): SessionEntry[] {
   const entries = getNewEntries(sourceFile, afterLine);
   for (const entry of entries) {
     appendFileSync(targetFile, JSON.stringify(entry) + "\n", "utf8");

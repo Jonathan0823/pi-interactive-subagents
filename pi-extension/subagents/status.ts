@@ -162,9 +162,7 @@ function readStatusConfigFile(configPath: string, examplePath: string): { source
   } catch (error) {
     const errno = error as NodeJS.ErrnoException;
     if (errno.code === "ENOENT") {
-      throw new Error(
-        `Missing subagent status config. Expected ${configPath} or ${examplePath}.`,
-      );
+      throw new Error(`Missing subagent status config. Expected ${configPath} or ${examplePath}.`);
     }
     throw error;
   }
@@ -198,10 +196,7 @@ export function formatElapsedDuration(ms: number): string {
   return `${minutes}m`;
 }
 
-export function createStatusState(params: {
-  source: SubagentStatusSource;
-  startTimeMs: number;
-}): SubagentStatusState {
+export function createStatusState(params: { source: SubagentStatusSource; startTimeMs: number }): SubagentStatusState {
   const initialKind = params.source === "claude" ? "running" : "starting";
   return {
     source: params.source,
@@ -246,26 +241,24 @@ export function observeStatus(
   const sequence = observation.sequence;
   const lastActivityAtMs = state.lastActivityAtMs;
   const lastActivitySequence = state.lastActivitySequence;
-  const olderThanLastActivity = lastActivityAtMs != null && (
-    updatedAt < lastActivityAtMs ||
-    (updatedAt === lastActivityAtMs && lastActivitySequence != null && sequence < lastActivitySequence)
-  );
+  const olderThanLastActivity =
+    lastActivityAtMs != null &&
+    (updatedAt < lastActivityAtMs ||
+      (updatedAt === lastActivityAtMs && lastActivitySequence != null && sequence < lastActivitySequence));
   if (olderThanLastActivity) return state;
 
-  const blockedByLocalOverride = state.localOverrideAtMs != null && (
-    updatedAt < state.localOverrideAtMs ||
-    (updatedAt === state.localOverrideAtMs && state.localOverrideSequence != null && sequence <= state.localOverrideSequence)
-  );
+  const blockedByLocalOverride =
+    state.localOverrideAtMs != null &&
+    (updatedAt < state.localOverrideAtMs ||
+      (updatedAt === state.localOverrideAtMs &&
+        state.localOverrideSequence != null &&
+        sequence <= state.localOverrideSequence));
   if (blockedByLocalOverride) return state;
 
   const phase = observation.phase;
   const activeNow = phase === "active" || observation.active === true;
-  const activeSinceMs = activeNow
-    ? observation.activeSince ?? state.activeSinceMs ?? updatedAt
-    : null;
-  const waitingSinceMs = phase === "waiting"
-    ? observation.waitingSince ?? state.waitingSinceMs ?? updatedAt
-    : null;
+  const activeSinceMs = activeNow ? (observation.activeSince ?? state.activeSinceMs ?? updatedAt) : null;
+  const waitingSinceMs = phase === "waiting" ? (observation.waitingSince ?? state.waitingSinceMs ?? updatedAt) : null;
 
   return {
     ...state,
@@ -274,7 +267,7 @@ export function observeStatus(
     lastActivitySequence: sequence,
     activeNow,
     activeSinceMs,
-    activeScope: activeNow ? observation.activeScope ?? null : null,
+    activeScope: activeNow ? (observation.activeScope ?? null) : null,
     waitingSinceMs,
     phase,
     latestEvent: observation.latestEvent ?? null,
@@ -382,15 +375,10 @@ export function classifyStatus(state: SubagentStatusState, now: number): StatusS
     statusLabel = classified.statusLabel;
   }
 
-  const activeDurationText = state.activeSinceMs == null
-    ? null
-    : formatElapsedDuration(now - state.activeSinceMs);
-  const waitingDurationText = state.waitingSinceMs == null
-    ? null
-    : formatElapsedDuration(now - state.waitingSinceMs);
-  const snapshotProblemText = state.snapshotProblemSinceMs == null
-    ? null
-    : formatElapsedDuration(now - state.snapshotProblemSinceMs);
+  const activeDurationText = state.activeSinceMs == null ? null : formatElapsedDuration(now - state.activeSinceMs);
+  const waitingDurationText = state.waitingSinceMs == null ? null : formatElapsedDuration(now - state.waitingSinceMs);
+  const snapshotProblemText =
+    state.snapshotProblemSinceMs == null ? null : formatElapsedDuration(now - state.snapshotProblemSinceMs);
 
   return {
     kind,
@@ -471,12 +459,15 @@ export function formatStatusLine(name: string, snapshot: StatusSnapshot): string
   }
 
   if (snapshot.kind === "waiting") {
-    const problem = snapshot.statusLabel && snapshot.statusLabel !== "done"
-      ? ` (${snapshot.statusLabel})`
-      : snapshot.statusLabel === "done"
-        ? " (done)"
-        : "";
-    return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}, ${formatWaitingDetail(snapshot)}${problem}.`);
+    const problem =
+      snapshot.statusLabel && snapshot.statusLabel !== "done"
+        ? ` (${snapshot.statusLabel})`
+        : snapshot.statusLabel === "done"
+          ? " (done)"
+          : "";
+    return boundStatusLine(
+      `${boundedName} running ${snapshot.elapsedText}, ${formatWaitingDetail(snapshot)}${problem}.`,
+    );
   }
 
   return boundStatusLine(`${boundedName} running ${snapshot.elapsedText}, ${formatStalledDetail(snapshot)}.`);

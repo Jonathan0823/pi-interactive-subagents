@@ -33,7 +33,14 @@ import {
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
 import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
-import { authorizeToolCall, fingerprintExtension, resolveExplicitLoadout, snapshotToolProviders, validateExplicitLoadoutSnapshot, validateToolProviderGrants } from "../pi-extension/subagents/loadout.ts";
+import {
+  authorizeToolCall,
+  fingerprintExtension,
+  resolveExplicitLoadout,
+  snapshotToolProviders,
+  validateExplicitLoadoutSnapshot,
+  validateToolProviderGrants,
+} from "../pi-extension/subagents/loadout.ts";
 import { createToolPolicyHandlers } from "../pi-extension/subagents/tool-policy.ts";
 import {
   advanceStatusState,
@@ -99,10 +106,12 @@ function chooseFromCustomModelPicker(index: number | number[] = 0) {
       { requestRender() {} },
       { fg: (_color: string, text: string) => text },
       { matches: (data: string, action: string) => data === actions[action] },
-      (value: string | undefined) => { selected = value; },
+      (value: string | undefined) => {
+        selected = value;
+      },
     );
     component.render(120);
-    const moves = Array.isArray(index) ? index[callIndex] ?? 0 : index;
+    const moves = Array.isArray(index) ? (index[callIndex] ?? 0) : index;
     callIndex++;
     for (let i = 0; i < Math.abs(moves); i++) component.handleInput(moves < 0 ? "UP" : "DOWN");
     component.handleInput("ENTER");
@@ -165,12 +174,7 @@ function withMockedNow<T>(now: number, fn: () => T): T {
   }
 }
 
-function writeAgentFile(
-  agentsDir: string,
-  name: string,
-  frontmatter: string,
-  body = "You are a test agent.",
-) {
+function writeAgentFile(agentsDir: string, name: string, frontmatter: string, body = "You are a test agent.") {
   mkdirSync(agentsDir, { recursive: true });
   writeFileSync(join(agentsDir, `${name}.md`), `---\n${frontmatter}\n---\n\n${body}\n`);
 }
@@ -491,10 +495,7 @@ describe("session.ts", () => {
         },
       };
       const entries = [earlierGood, overloadError] as any[];
-      assert.equal(
-        findLastAssistantMessage(entries),
-        "Subagent error: Anthropic 529 Overloaded after 3 retries",
-      );
+      assert.equal(findLastAssistantMessage(entries), "Subagent error: Anthropic 529 Overloaded after 3 retries");
     });
 
     it("prefers text content even when an error stopReason is set", () => {
@@ -610,8 +611,14 @@ describe("session.ts", () => {
       assert.equal(entries[0].parentSession, parentFile);
       assert.equal(entries[0].cwd, "/tmp/fork-child-cwd");
       assert.equal(entries[1].type, "model_change");
-      assert.equal(entries.some((entry) => entry.type === "session" && entry.parentSession !== parentFile), false);
-      assert.equal(entries.some((entry) => entry.type === "message"), false);
+      assert.equal(
+        entries.some((entry) => entry.type === "session" && entry.parentSession !== parentFile),
+        false,
+      );
+      assert.equal(
+        entries.some((entry) => entry.type === "message"),
+        false,
+      );
     });
   });
 
@@ -624,10 +631,7 @@ describe("session.ts", () => {
         sourceFile,
         [SESSION_HEADER, USER_MSG, ASSISTANT_MSG].map((e) => JSON.stringify(e)).join("\n") + "\n",
       );
-      writeFileSync(
-        targetFile,
-        [SESSION_HEADER, USER_MSG].map((e) => JSON.stringify(e)).join("\n") + "\n",
-      );
+      writeFileSync(targetFile, [SESSION_HEADER, USER_MSG].map((e) => JSON.stringify(e)).join("\n") + "\n");
 
       // Merge entries after line 2 (the shared base)
       const merged = mergeNewEntries(sourceFile, targetFile, 2);
@@ -641,11 +645,14 @@ describe("session.ts", () => {
   });
 
   describe("summarizeSessionStats", () => {
-    const asstWithUsage = (id: string, opts: {
-      model?: string;
-      tools?: string[];
-      usage?: Record<string, unknown>;
-    }) => ({
+    const asstWithUsage = (
+      id: string,
+      opts: {
+        model?: string;
+        tools?: string[];
+        usage?: Record<string, unknown>;
+      },
+    ) => ({
       type: "message",
       id,
       parentId: "user-001",
@@ -667,11 +674,25 @@ describe("session.ts", () => {
         USER_MSG,
         asstWithUsage("a1", {
           tools: ["read", "grep"],
-          usage: { input: 100, output: 50, cacheRead: 1000, cacheWrite: 200, totalTokens: 1350, cost: { total: 0.01 } },
+          usage: {
+            input: 100,
+            output: 50,
+            cacheRead: 1000,
+            cacheWrite: 200,
+            totalTokens: 1350,
+            cost: { total: 0.01 },
+          },
         }),
         asstWithUsage("a2", {
           tools: ["write"],
-          usage: { input: 30, output: 70, cacheRead: 2000, cacheWrite: 0, totalTokens: 3500, cost: { total: 0.02 } },
+          usage: {
+            input: 30,
+            output: 70,
+            cacheRead: 2000,
+            cacheWrite: 0,
+            totalTokens: 3500,
+            cost: { total: 0.02 },
+          },
         }),
       ]);
       const stats = summarizeSessionStats(file)!;
@@ -690,7 +711,10 @@ describe("session.ts", () => {
       const file = createSessionFile(dir, [
         SESSION_HEADER,
         { type: "model_change", id: "mc-001", parentId: null, modelId: "claude-haiku-4-5" },
-        asstWithUsage("a1", { model: "claude-sonnet-4-6", usage: { totalTokens: 10, cost: { total: 0 } } }),
+        asstWithUsage("a1", {
+          model: "claude-sonnet-4-6",
+          usage: { totalTokens: 10, cost: { total: 0 } },
+        }),
       ]);
       assert.equal(summarizeSessionStats(file)!.model, "claude-sonnet-4-6");
     });
@@ -733,10 +757,7 @@ describe("status.ts", () => {
   it("loads the shared example when local config is absent", () => {
     withTempDir((dir) => {
       const examplePath = join(dir, "config.json.example");
-      writeFileSync(
-        examplePath,
-        JSON.stringify({ status: { enabled: true } }, null, 2) + "\n",
-      );
+      writeFileSync(examplePath, JSON.stringify({ status: { enabled: true } }, null, 2) + "\n");
 
       const config = loadStatusConfig(join(dir, "config.json"), examplePath);
 
@@ -748,10 +769,7 @@ describe("status.ts", () => {
   });
 
   it("fails fast for invalid config shapes", () => {
-    assert.throws(
-      () => parseStatusConfig({ status: { enabled: "false" } }),
-      /status\.enabled must be a boolean/,
-    );
+    assert.throws(() => parseStatusConfig({ status: { enabled: "false" } }), /status\.enabled must be a boolean/);
     assert.throws(
       () => parseStatusConfig({ status: { enabled: true, defaultCadenceSeconds: 60 } }),
       /status has unsupported key\(s\): defaultCadenceSeconds/,
@@ -784,15 +802,9 @@ describe("status.ts", () => {
       const configPath = join(dir, "config.json");
       const examplePath = join(dir, "config.json.example");
       writeFileSync(configPath, "{\n");
-      writeFileSync(
-        examplePath,
-        JSON.stringify({ status: { enabled: true } }, null, 2) + "\n",
-      );
+      writeFileSync(examplePath, JSON.stringify({ status: { enabled: true } }, null, 2) + "\n");
 
-      assert.throws(
-        () => loadStatusConfig(configPath, examplePath),
-        /Invalid JSON in subagent config .*config\.json/,
-      );
+      assert.throws(() => loadStatusConfig(configPath, examplePath), /Invalid JSON in subagent config .*config\.json/);
     });
   });
 
@@ -808,17 +820,21 @@ describe("status.ts", () => {
 
   it("classifies active snapshots without aging into stalled", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-      latestEvent: "tool_execution_start",
-    }, 5_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+        latestEvent: "tool_execution_start",
+      },
+      5_000,
+    );
 
     const snapshot = classifyStatus(state, 240_000);
     assert.equal(snapshot.kind, "active");
@@ -828,14 +844,18 @@ describe("status.ts", () => {
 
   it("classifies waiting snapshots as healthy idle without becoming stalled", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 10_000,
-      sequence: 1,
-      phase: "waiting",
-      waitingSince: 10_000,
-      latestEvent: "agent_end",
-    }, 10_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 10_000,
+        sequence: 1,
+        phase: "waiting",
+        waitingSince: 10_000,
+        latestEvent: "agent_end",
+      },
+      10_000,
+    );
 
     const snapshot = classifyStatus(state, 240_000);
     assert.equal(snapshot.kind, "waiting");
@@ -858,14 +878,18 @@ describe("status.ts", () => {
     assert.equal(advanced.transition, "stalled");
     assert.equal(advanced.snapshot.kind, "stalled");
 
-    state = observeStatus(advanced.nextState, {
-      snapshot: "present",
-      updatedAt: 96_000,
-      sequence: 1,
-      phase: "waiting",
-      waitingSince: 96_000,
-      latestEvent: "agent_end",
-    }, 96_000);
+    state = observeStatus(
+      advanced.nextState,
+      {
+        snapshot: "present",
+        updatedAt: 96_000,
+        sequence: 1,
+        phase: "waiting",
+        waitingSince: 96_000,
+        latestEvent: "agent_end",
+      },
+      96_000,
+    );
     advanced = advanceStatusState(state, 97_000);
     assert.equal(advanced.transition, "recovered");
     assert.equal(advanced.snapshot.kind, "waiting");
@@ -873,15 +897,19 @@ describe("status.ts", () => {
 
   it("keeps the last healthy kind during transient snapshot loss", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "streaming",
-      activeSince: 5_000,
-    }, 5_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "streaming",
+        activeSince: 5_000,
+      },
+      5_000,
+    );
     state = advanceStatusState(state, 6_000).nextState;
     state = observeStatus(state, { snapshot: "missing" }, 10_000);
 
@@ -893,16 +921,20 @@ describe("status.ts", () => {
   it("forces an active state to waiting after interrupt", () => {
     const now = 20_000;
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-    }, 5_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+      },
+      5_000,
+    );
 
     assert.equal(classifyStatus(state, now).kind, "active");
 
@@ -917,25 +949,33 @@ describe("status.ts", () => {
 
   it("orders same-millisecond snapshots by sequence", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 10_000,
-      sequence: 2,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 10_000,
-      activityLabel: "bash",
-    }, 10_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 10_000,
+        sequence: 2,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 10_000,
+        activityLabel: "bash",
+      },
+      10_000,
+    );
 
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 10_000,
-      sequence: 3,
-      phase: "waiting",
-      waitingSince: 10_000,
-      latestEvent: "agent_end",
-    }, 10_001);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 10_000,
+        sequence: 3,
+        phase: "waiting",
+        waitingSince: 10_000,
+        latestEvent: "agent_end",
+      },
+      10_001,
+    );
 
     const snapshot = classifyStatus(state, 11_000);
     assert.equal(snapshot.kind, "waiting");
@@ -944,29 +984,37 @@ describe("status.ts", () => {
 
   it("recovers from a transient snapshot read failure with the same valid snapshot", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 2,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-    }, 5_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 2,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+      },
+      5_000,
+    );
     state = observeStatus(state, { snapshot: "missing" }, 10_000);
     assert.equal(classifyStatus(state, 10_000).statusLabel, null);
 
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 2,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-    }, 11_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 2,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+      },
+      11_000,
+    );
 
     const snapshot = classifyStatus(state, 11_000);
     assert.equal(snapshot.kind, "active");
@@ -975,56 +1023,72 @@ describe("status.ts", () => {
 
   it("ignores stale and exact old snapshots after interrupt and accepts newer snapshots", () => {
     let state = createStatusState({ source: "pi", startTimeMs: 0 });
-    state = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-    }, 5_000);
+    state = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+      },
+      5_000,
+    );
     state = forceStatusAfterInterrupt(state, 20_000);
 
-    const stale = observeStatus(state, {
-      snapshot: "present",
-      updatedAt: 5_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 5_000,
-      activityLabel: "bash",
-    }, 21_000);
+    const stale = observeStatus(
+      state,
+      {
+        snapshot: "present",
+        updatedAt: 5_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 5_000,
+        activityLabel: "bash",
+      },
+      21_000,
+    );
     let snapshot = classifyStatus(stale, 21_000);
     assert.equal(snapshot.kind, "waiting");
     assert.equal(snapshot.activityLabel, "interrupted");
 
-    const sameTimestamp = observeStatus(stale, {
-      snapshot: "present",
-      updatedAt: 20_000,
-      sequence: 1,
-      phase: "active",
-      active: true,
-      activeScope: "tool",
-      activeSince: 20_000,
-      activityLabel: "bash",
-    }, 22_000);
+    const sameTimestamp = observeStatus(
+      stale,
+      {
+        snapshot: "present",
+        updatedAt: 20_000,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: 20_000,
+        activityLabel: "bash",
+      },
+      22_000,
+    );
     snapshot = classifyStatus(sameTimestamp, 22_000);
     assert.equal(snapshot.kind, "waiting");
     assert.equal(snapshot.activityLabel, "interrupted");
 
-    const resumed = observeStatus(sameTimestamp, {
-      snapshot: "present",
-      sequence: 2,
-      updatedAt: 25_000,
-      phase: "active",
-      active: true,
-      activeScope: "streaming",
-      activeSince: 25_000,
-      activityLabel: "streaming",
-    }, 25_000);
+    const resumed = observeStatus(
+      sameTimestamp,
+      {
+        snapshot: "present",
+        sequence: 2,
+        updatedAt: 25_000,
+        phase: "active",
+        active: true,
+        activeScope: "streaming",
+        activeSince: 25_000,
+        activityLabel: "streaming",
+      },
+      25_000,
+    );
     snapshot = classifyStatus(resumed, 25_000);
     assert.equal(snapshot.kind, "active");
     assert.equal(resumed.activeScope, "streaming");
@@ -1063,7 +1127,13 @@ describe("status.ts", () => {
   it("caps visible status lines and reports overflow consistently", () => {
     const waitingState = observeStatus(
       createStatusState({ source: "pi", startTimeMs: 0 }),
-      { snapshot: "present", updatedAt: 180_000, sequence: 1, phase: "waiting", waitingSince: 180_000 },
+      {
+        snapshot: "present",
+        updatedAt: 180_000,
+        sequence: 1,
+        phase: "waiting",
+        waitingSince: 180_000,
+      },
       180_000,
     );
     const activeState = observeStatus(
@@ -1140,7 +1210,14 @@ describe("subagent discovery", () => {
     };
     const watched: any[] = [];
     const results = [
-      { name: primary.name, task: primary.task, summary: "provider error", exitCode: 1, elapsed: 1, errorMessage: "402 credits" },
+      {
+        name: primary.name,
+        task: primary.task,
+        summary: "provider error",
+        exitCode: 1,
+        elapsed: 1,
+        errorMessage: "402 credits",
+      },
       { name: fallback.name, task: fallback.task, summary: "completed", exitCode: 0, elapsed: 2 },
     ];
 
@@ -1167,11 +1244,7 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "lineage-mode-test-agent",
-        [
-          "name: lineage-mode-test-agent",
-          "model: anthropic/test-lineage",
-          "session-mode: lineage-only",
-        ].join("\n"),
+        ["name: lineage-mode-test-agent", "model: anthropic/test-lineage", "session-mode: lineage-only"].join("\n"),
       );
 
       const loaded = testApi.loadAgentDefaults("lineage-mode-test-agent");
@@ -1185,20 +1258,14 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "interactive-true-test-agent",
-        [
-          "name: interactive-true-test-agent",
-          "model: anthropic/test-interactive-true",
-          "interactive: true",
-        ].join("\n"),
+        ["name: interactive-true-test-agent", "model: anthropic/test-interactive-true", "interactive: true"].join("\n"),
       );
       writeAgentFile(
         projectAgentsDir,
         "interactive-false-test-agent",
-        [
-          "name: interactive-false-test-agent",
-          "model: anthropic/test-interactive-false",
-          "interactive: false",
-        ].join("\n"),
+        ["name: interactive-false-test-agent", "model: anthropic/test-interactive-false", "interactive: false"].join(
+          "\n",
+        ),
       );
 
       const loadedTrue = testApi.loadAgentDefaults("interactive-true-test-agent");
@@ -1214,10 +1281,7 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "interactive-unset-test-agent",
-        [
-          "name: interactive-unset-test-agent",
-          "model: anthropic/test-interactive-unset",
-        ].join("\n"),
+        ["name: interactive-unset-test-agent", "model: anthropic/test-interactive-unset"].join("\n"),
       );
 
       const loaded = testApi.loadAgentDefaults("interactive-unset-test-agent");
@@ -1227,43 +1291,22 @@ describe("subagent discovery", () => {
 
   it("resolveEffectiveInteractive defaults to the inverse of auto-exit", () => {
     // Autonomous agents (auto-exit: true) are NOT interactive — parent gets stall pings.
-    assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true }),
-      false,
-    );
+    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true }), false);
     // Agents without auto-exit ARE interactive — parent does not receive status transition pings.
-    assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: false }),
-      true,
-    );
-    assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, {}),
-      true,
-    );
+    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: false }), true);
+    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, {}), true);
     // Bare spawn with no agent defs (e.g. /iterate fork) is interactive by default.
-    assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, null),
-      true,
-    );
+    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, null), true);
   });
 
   it("resolveEffectiveInteractive honors explicit frontmatter over the auto-exit default", () => {
     // Autonomous agent that still wants to be treated as interactive.
     assert.equal(
-      testApi.resolveEffectiveInteractive(
-        { name: "A", task: "T" },
-        { autoExit: true, interactive: true },
-      ),
+      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true, interactive: true }),
       true,
     );
     // Non-auto-exit agent that opts back into stall pings.
-    assert.equal(
-      testApi.resolveEffectiveInteractive(
-        { name: "A", task: "T" },
-        { interactive: false },
-      ),
-      false,
-    );
+    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { interactive: false }), false);
   });
 
   it("bundled scout/researcher/worker all resolve as non-interactive (auto-exit)", () => {
@@ -1317,11 +1360,7 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "invalid-mode-test-agent",
-        [
-          "name: invalid-mode-test-agent",
-          "model: anthropic/test-invalid",
-          "session-mode: sideways",
-        ].join("\n"),
+        ["name: invalid-mode-test-agent", "model: anthropic/test-invalid", "session-mode: sideways"].join("\n"),
       );
 
       const loaded = testApi.loadAgentDefaults("invalid-mode-test-agent");
@@ -1336,10 +1375,7 @@ describe("subagent discovery", () => {
       testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, { sessionMode: "lineage-only" }),
       "lineage-only",
     );
-    assert.equal(
-      testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, { sessionMode: "fork" }),
-      "fork",
-    );
+    assert.equal(testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, { sessionMode: "fork" }), "fork");
   });
 
   it("resolves launch behavior for standalone, lineage-only, and fork modes", () => {
@@ -1349,31 +1385,22 @@ describe("subagent discovery", () => {
       inheritsConversationContext: false,
       taskDelivery: "artifact",
     });
-    assert.deepEqual(
-      testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "lineage-only" }),
-      {
-        sessionMode: "lineage-only",
-        seededSessionMode: "lineage-only",
-        inheritsConversationContext: false,
-        taskDelivery: "artifact",
-      },
-    );
-    assert.deepEqual(
-      testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "fork" }),
-      {
-        sessionMode: "fork",
-        seededSessionMode: "fork",
-        inheritsConversationContext: true,
-        taskDelivery: "direct",
-      },
-    );
+    assert.deepEqual(testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "lineage-only" }), {
+      sessionMode: "lineage-only",
+      seededSessionMode: "lineage-only",
+      inheritsConversationContext: false,
+      taskDelivery: "artifact",
+    });
+    assert.deepEqual(testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "fork" }), {
+      sessionMode: "fork",
+      seededSessionMode: "fork",
+      inheritsConversationContext: true,
+      taskDelivery: "direct",
+    });
   });
 
   it("buildSubagentToolAllowlist preserves requested tools and adds child control tools", () => {
-    assert.equal(
-      testApi.buildSubagentToolAllowlist("read,bash,web_search"),
-      "read,bash,web_search,ask_question",
-    );
+    assert.equal(testApi.buildSubagentToolAllowlist("read,bash,web_search"), "read,bash,web_search,ask_question");
   });
 
   it("buildSubagentToolAllowlist returns null without an explicit tool restriction", () => {
@@ -1407,22 +1434,30 @@ describe("subagent discovery", () => {
 
   it("requires tools to come from a selected resource", () => {
     assert.throws(
-      () => resolveExplicitLoadout(
-        { extensions: ["builtin:codemode"], mcpServers: [], tools: ["web_search"] },
-        [{ name: "builtin:codemode", path: "builtin:codemode" }],
-        [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }],
-      ),
+      () =>
+        resolveExplicitLoadout(
+          { extensions: ["builtin:codemode"], mcpServers: [], tools: ["web_search"] },
+          [{ name: "builtin:codemode", path: "builtin:codemode" }],
+          [
+            {
+              name: "web_search",
+              provider: "/extensions/web-search.ts",
+              contractFingerprint: testContract,
+            },
+          ],
+        ),
       /not provided by an explicitly selected resource/,
     );
   });
 
   it("rejects MCP selections until isolated MCP loading is supported", () => {
     assert.throws(
-      () => resolveExplicitLoadout(
-        { extensions: ["builtin:codemode"], mcpServers: ["context-mode"], tools: ["codemode"] },
-        [{ name: "builtin:codemode", path: "builtin:codemode" }],
-        [{ name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract }],
-      ),
+      () =>
+        resolveExplicitLoadout(
+          { extensions: ["builtin:codemode"], mcpServers: ["context-mode"], tools: ["codemode"] },
+          [{ name: "builtin:codemode", path: "builtin:codemode" }],
+          [{ name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract }],
+        ),
       /Selective MCP server loadouts are not supported/,
     );
   });
@@ -1484,11 +1519,12 @@ describe("subagent discovery", () => {
       const path = join(dir, "extension.ts");
       writeFileSync(path, "export default () => undefined;", "utf8");
       assert.throws(
-        () => resolveExplicitLoadout(
-          { extensions: ["untrusted-extension"], tools: [] },
-          [{ name: "untrusted-extension", path }],
-          [],
-        ),
+        () =>
+          resolveExplicitLoadout(
+            { extensions: ["untrusted-extension"], tools: [] },
+            [{ name: "untrusted-extension", path }],
+            [],
+          ),
         /trusted registration identity/,
       );
       const resolved = resolveExplicitLoadout(
@@ -1521,30 +1557,64 @@ describe("subagent discovery", () => {
         runnerFiles: [{ path: policyPath, fingerprint: fingerprintExtension(policyPath) }],
       };
       const registered = [{ name: "sample-extension", path, identity: "sample-extension@1.2.3" }];
-      assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(snapshot, {
-        runtimeVersion: "1.4.0", registeredExtensions: registered, requirePinnedContracts: true,
-        currentTools: resolved.toolProviders,
-      }));
-      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
-        runtimeVersion: "1.4.0",
-        registeredExtensions: [{ name: "sample-extension", path, identity: "sample-extension@1.2.4" }],
-      }), /changed identity/);
-      assert.throws(() => validateExplicitLoadoutSnapshot({
-        ...snapshot,
-        extensions: [{ name: "sample-extension", path, identity: "", fingerprint: resolved.extensions[0].fingerprint }],
-      }, { runtimeVersion: "1.4.0", registeredExtensions: registered }), /no trusted registration identity/);
-      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
-        runtimeVersion: "1.4.0", registeredExtensions: registered, requirePinnedContracts: true,
-        currentTools: [{ name: "sample_tool", provider: path, contractFingerprint: "changed" }],
-      }), /changed provider or contract/);
+      assert.doesNotThrow(() =>
+        validateExplicitLoadoutSnapshot(snapshot, {
+          runtimeVersion: "1.4.0",
+          registeredExtensions: registered,
+          requirePinnedContracts: true,
+          currentTools: resolved.toolProviders,
+        }),
+      );
+      assert.throws(
+        () =>
+          validateExplicitLoadoutSnapshot(snapshot, {
+            runtimeVersion: "1.4.0",
+            registeredExtensions: [{ name: "sample-extension", path, identity: "sample-extension@1.2.4" }],
+          }),
+        /changed identity/,
+      );
+      assert.throws(
+        () =>
+          validateExplicitLoadoutSnapshot(
+            {
+              ...snapshot,
+              extensions: [
+                {
+                  name: "sample-extension",
+                  path,
+                  identity: "",
+                  fingerprint: resolved.extensions[0].fingerprint,
+                },
+              ],
+            },
+            { runtimeVersion: "1.4.0", registeredExtensions: registered },
+          ),
+        /no trusted registration identity/,
+      );
+      assert.throws(
+        () =>
+          validateExplicitLoadoutSnapshot(snapshot, {
+            runtimeVersion: "1.4.0",
+            registeredExtensions: registered,
+            requirePinnedContracts: true,
+            currentTools: [{ name: "sample_tool", provider: path, contractFingerprint: "changed" }],
+          }),
+        /changed provider or contract/,
+      );
       writeFileSync(policyPath, "export const policy = 2;", "utf8");
-      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }), /policy code changed/);
+      assert.throws(
+        () => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }),
+        /policy code changed/,
+      );
       writeFileSync(path, "export default () => 2;", "utf8");
-      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
-        runtimeVersion: "1.4.0", registeredExtensions: [
-          { name: "sample-extension", path, identity: "sample-extension@1.2.3" },
-        ],
-      }), /changed/);
+      assert.throws(
+        () =>
+          validateExplicitLoadoutSnapshot(snapshot, {
+            runtimeVersion: "1.4.0",
+            registeredExtensions: [{ name: "sample-extension", path, identity: "sample-extension@1.2.3" }],
+          }),
+        /changed/,
+      );
     });
   });
 
@@ -1559,36 +1629,58 @@ describe("subagent discovery", () => {
 
   it("rejects wildcard grants and duplicate provider identities", () => {
     assert.throws(
-      () => resolveExplicitLoadout(
-        { extensions: [], mcpServers: [], tools: ["mcp__*"] },
-        [],
-        [{ name: "mcp__ctx_search", provider: "builtin:mcp" }],
-      ),
+      () =>
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: [], tools: ["mcp__*"] },
+          [],
+          [{ name: "mcp__ctx_search", provider: "builtin:mcp" }],
+        ),
       /Exact tool names are required/,
     );
     assert.throws(
-      () => validateToolProviderGrants(
-        [{ name: "read", provider: "builtin:read" }],
-        [
-          { name: "read", provider: "builtin:read" },
-          { name: "read", provider: "builtin:read-shadow" },
-        ],
-      ),
+      () =>
+        validateToolProviderGrants(
+          [{ name: "read", provider: "builtin:read" }],
+          [
+            { name: "read", provider: "builtin:read" },
+            { name: "read", provider: "builtin:read-shadow" },
+          ],
+        ),
       /ambiguous/,
     );
   });
 
   it("authorizes direct and nested calls only for the exact pinned provider", () => {
-    const grants = [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }];
-    const providers = [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }];
+    const grants = [
+      {
+        name: "web_search",
+        provider: "/extensions/web-search.ts",
+        contractFingerprint: testContract,
+      },
+    ];
+    const providers = [
+      {
+        name: "web_search",
+        provider: "/extensions/web-search.ts",
+        contractFingerprint: testContract,
+      },
+    ];
     assert.deepEqual(authorizeToolCall("web_search", grants, providers), { allowed: true });
     assert.match(authorizeToolCall("web_fetch", grants, providers).reason ?? "", /not granted/);
     assert.match(
-      authorizeToolCall("web_search", grants, [{ name: "web_search", provider: "/extensions/other.ts", contractFingerprint: testContract }]).reason ?? "",
+      authorizeToolCall("web_search", grants, [
+        { name: "web_search", provider: "/extensions/other.ts", contractFingerprint: testContract },
+      ]).reason ?? "",
       /provider or contract changed/,
     );
     assert.match(
-      authorizeToolCall("web_search", grants, [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: "changed" }]).reason ?? "",
+      authorizeToolCall("web_search", grants, [
+        {
+          name: "web_search",
+          provider: "/extensions/web-search.ts",
+          contractFingerprint: "changed",
+        },
+      ]).reason ?? "",
       /provider or contract changed/,
     );
   });
@@ -1600,7 +1692,11 @@ describe("subagent discovery", () => {
       () => providers,
     );
     assert.equal(policy.authorize({ toolName: "read" })?.block, true);
-    policy.start({ shutdown() { assert.fail("valid provider setup should not shut down"); } });
+    policy.start({
+      shutdown() {
+        assert.fail("valid provider setup should not shut down");
+      },
+    });
     assert.deepEqual(policy.handleInput(), { action: "continue" });
     assert.equal(policy.authorize({ toolName: "read" })?.block, undefined);
     assert.equal(policy.authorize({ toolName: "write", parentToolCallId: "codemode/1" })?.block, true);
@@ -1611,45 +1707,89 @@ describe("subagent discovery", () => {
   it("signals readiness only when the validated initial input is allowed", () => {
     const provider = { name: "read", provider: "builtin:read", contractFingerprint: testContract };
     let readinessSignals = 0;
-    const policy = createToolPolicyHandlers([provider], () => [provider], undefined, () => { readinessSignals++; });
+    const policy = createToolPolicyHandlers(
+      [provider],
+      () => [provider],
+      undefined,
+      () => {
+        readinessSignals++;
+      },
+    );
     assert.deepEqual(policy.handleInput(), { action: "handled" });
-    policy.start({ shutdown() { assert.fail("valid provider setup should not shut down"); } });
+    policy.start({
+      shutdown() {
+        assert.fail("valid provider setup should not shut down");
+      },
+    });
     assert.equal(readinessSignals, 0);
     assert.equal(policy.authorize({ toolName: "read" })?.block, true);
     assert.deepEqual(policy.handleInput(), { action: "continue" });
     assert.equal(readinessSignals, 1);
     assert.equal(policy.authorize({ toolName: "read" })?.block, undefined);
 
-    const invalid = createToolPolicyHandlers(
-      [{ ...provider, contractFingerprint: "changed" }],
-      () => [provider],
-    );
+    const invalid = createToolPolicyHandlers([{ ...provider, contractFingerprint: "changed" }], () => [provider]);
     invalid.start({ shutdown() {} });
     assert.deepEqual(invalid.handleInput(), { action: "handled" });
 
     let currentProviders = [provider];
     let shutdownCount = 0;
-    const drifted = createToolPolicyHandlers([provider], () => currentProviders, undefined, () => { readinessSignals++; });
-    drifted.start({ shutdown() { shutdownCount++; } });
+    const drifted = createToolPolicyHandlers(
+      [provider],
+      () => currentProviders,
+      undefined,
+      () => {
+        readinessSignals++;
+      },
+    );
+    drifted.start({
+      shutdown() {
+        shutdownCount++;
+      },
+    });
     currentProviders = [{ ...provider, contractFingerprint: "changed" }];
-    assert.deepEqual(drifted.handleInput({ shutdown() { shutdownCount++; } }), { action: "handled" });
+    assert.deepEqual(
+      drifted.handleInput({
+        shutdown() {
+          shutdownCount++;
+        },
+      }),
+      { action: "handled" },
+    );
     assert.equal(shutdownCount, 1, "provider drift must shut down the child before the model request");
     assert.equal(readinessSignals, 1, "provider drift must not signal readiness");
   });
 
   it("pins runner-managed tool contracts on the first start and checks them thereafter", () => {
     let pinned: readonly any[] = [];
-    let providers = [{ name: "ask_question", provider: "/runner/subagent-done.ts", contractFingerprint: testContract }];
+    let providers = [
+      {
+        name: "ask_question",
+        provider: "/runner/subagent-done.ts",
+        contractFingerprint: testContract,
+      },
+    ];
     const policy = createToolPolicyHandlers(
       [{ name: "ask_question", provider: "/runner/subagent-done.ts", runnerManaged: true }],
       () => providers,
-      (grants) => { pinned = grants; },
+      (grants) => {
+        pinned = grants;
+      },
     );
-    policy.start({ shutdown() { assert.fail("runner tool contract should pin successfully"); } });
+    policy.start({
+      shutdown() {
+        assert.fail("runner tool contract should pin successfully");
+      },
+    });
     assert.equal((pinned[0] as any).contractFingerprint, testContract);
     assert.deepEqual(policy.handleInput(), { action: "continue" });
     assert.equal(policy.authorize({ toolName: "ask_question" }), undefined);
-    providers = [{ name: "ask_question", provider: "/runner/subagent-done.ts", contractFingerprint: "changed" }];
+    providers = [
+      {
+        name: "ask_question",
+        provider: "/runner/subagent-done.ts",
+        contractFingerprint: "changed",
+      },
+    ];
     assert.equal(policy.authorize({ toolName: "ask_question" })?.block, true);
   });
 
@@ -1687,25 +1827,51 @@ describe("subagent discovery", () => {
     };
     assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }));
     assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.1" }), /runtime changed/);
-    const unresolved = { ...snapshot, toolProviders: [{ name: "ask_question", provider: "/runner", runnerManaged: true }] };
-    assert.throws(() => validateExplicitLoadoutSnapshot(unresolved, {
-      runtimeVersion: "1.4.0", requirePinnedContracts: true,
-    }), /not pinned/);
+    const unresolved = {
+      ...snapshot,
+      toolProviders: [{ name: "ask_question", provider: "/runner", runnerManaged: true }],
+    };
+    assert.throws(
+      () =>
+        validateExplicitLoadoutSnapshot(unresolved, {
+          runtimeVersion: "1.4.0",
+          requirePinnedContracts: true,
+        }),
+      /not pinned/,
+    );
     const pinnedRunnerGrant = {
       ...snapshot,
-      toolProviders: [{ name: "ask_question", provider: "/runner", contractFingerprint: testContract, runnerManaged: true }],
+      toolProviders: [
+        {
+          name: "ask_question",
+          provider: "/runner",
+          contractFingerprint: testContract,
+          runnerManaged: true,
+        },
+      ],
     };
-    assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(pinnedRunnerGrant, {
-      runtimeVersion: "1.4.0", requirePinnedContracts: true,
-      currentTools: [{ name: "ask_question", provider: "/changed-parent", contractFingerprint: "different" }],
-    }));
-    assert.throws(() => validateExplicitLoadoutSnapshot({
-      ...pinnedRunnerGrant,
-      toolProviders: [{ name: "selected_tool", provider: "/extension", contractFingerprint: testContract }],
-    }, {
-      runtimeVersion: "1.4.0", requirePinnedContracts: true,
-      currentTools: [{ name: "selected_tool", provider: "/changed-parent", contractFingerprint: "different" }],
-    }), /changed provider or contract/);
+    assert.doesNotThrow(() =>
+      validateExplicitLoadoutSnapshot(pinnedRunnerGrant, {
+        runtimeVersion: "1.4.0",
+        requirePinnedContracts: true,
+        currentTools: [{ name: "ask_question", provider: "/changed-parent", contractFingerprint: "different" }],
+      }),
+    );
+    assert.throws(
+      () =>
+        validateExplicitLoadoutSnapshot(
+          {
+            ...pinnedRunnerGrant,
+            toolProviders: [{ name: "selected_tool", provider: "/extension", contractFingerprint: testContract }],
+          },
+          {
+            runtimeVersion: "1.4.0",
+            requirePinnedContracts: true,
+            currentTools: [{ name: "selected_tool", provider: "/changed-parent", contractFingerprint: "different" }],
+          },
+        ),
+      /changed provider or contract/,
+    );
   });
 
   it("applySandboxToParts explicitly loads codemode and disables MCP in strict mode", () => {
@@ -1830,21 +1996,33 @@ describe("subagent discovery", () => {
 
   it("buildPiPromptArgs inserts separator for artifact-backed launches with skills", () => {
     assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: "review,lint", taskDelivery: "artifact", taskArg: "@artifact.md" }),
+      testApi.buildPiPromptArgs({
+        effectiveSkills: "review,lint",
+        taskDelivery: "artifact",
+        taskArg: "@artifact.md",
+      }),
       ["", "/skill:review", "/skill:lint", "@artifact.md"],
     );
   });
 
   it("buildPiPromptArgs omits separator for artifact-backed launches without skills", () => {
     assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: undefined, taskDelivery: "artifact", taskArg: "@artifact.md" }),
+      testApi.buildPiPromptArgs({
+        effectiveSkills: undefined,
+        taskDelivery: "artifact",
+        taskArg: "@artifact.md",
+      }),
       ["@artifact.md"],
     );
   });
 
   it("buildPiPromptArgs omits separator for direct launches with skills", () => {
     assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: "review", taskDelivery: "direct", taskArg: "do the task" }),
+      testApi.buildPiPromptArgs({
+        effectiveSkills: "review",
+        taskDelivery: "direct",
+        taskArg: "do the task",
+      }),
       ["/skill:review", "do the task"],
     );
   });
@@ -1854,11 +2032,9 @@ describe("subagent discovery", () => {
       writeAgentFile(
         projectAgentsDir,
         "visible-discovery-test-agent",
-        [
-          "name: visible-discovery-test-agent",
-          "description: Visible test agent",
-          "model: anthropic/test-visible",
-        ].join("\n"),
+        ["name: visible-discovery-test-agent", "description: Visible test agent", "model: anthropic/test-visible"].join(
+          "\n",
+        ),
       );
 
       const { api, registeredTools } = createMockExtensionApi();
@@ -1898,7 +2074,10 @@ describe("subagent discovery", () => {
       const result = await tool.execute();
       const agents = result.details?.agents ?? [];
 
-      assert.equal(agents.some((agent: any) => agent.name === "hidden-discovery-test-agent"), false);
+      assert.equal(
+        agents.some((agent: any) => agent.name === "hidden-discovery-test-agent"),
+        false,
+      );
       assert.doesNotMatch(result.content[0].text, /hidden-discovery-test-agent/);
 
       const loaded = testApi.loadAgentDefaults("hidden-discovery-test-agent");
@@ -1942,7 +2121,10 @@ describe("subagent discovery", () => {
       const result = await tool.execute();
       const agents = result.details?.agents ?? [];
 
-      assert.equal(agents.some((agent: any) => agent.name === "shadowed-discovery-test-agent"), false);
+      assert.equal(
+        agents.some((agent: any) => agent.name === "shadowed-discovery-test-agent"),
+        false,
+      );
       assert.doesNotMatch(result.content[0].text, /shadowed-discovery-test-agent/);
 
       const loaded = testApi.loadAgentDefaults("shadowed-discovery-test-agent");
@@ -2049,16 +2231,33 @@ describe("subagent-done.ts", () => {
     });
 
     it("reflects the live child count published by index.ts", () => {
-      withGlobal(() => 3, () => {
-        assert.equal(runningChildrenCount(), 3);
-      });
+      withGlobal(
+        () => 3,
+        () => {
+          assert.equal(runningChildrenCount(), 3);
+        },
+      );
     });
 
     it("treats zero/negative/non-number/throwing getters as 0", () => {
-      withGlobal(() => 0, () => assert.equal(runningChildrenCount(), 0));
-      withGlobal(() => -1, () => assert.equal(runningChildrenCount(), 0));
-      withGlobal(() => "two", () => assert.equal(runningChildrenCount(), 0));
-      withGlobal(() => { throw new Error("boom"); }, () => assert.equal(runningChildrenCount(), 0));
+      withGlobal(
+        () => 0,
+        () => assert.equal(runningChildrenCount(), 0),
+      );
+      withGlobal(
+        () => -1,
+        () => assert.equal(runningChildrenCount(), 0),
+      );
+      withGlobal(
+        () => "two",
+        () => assert.equal(runningChildrenCount(), 0),
+      );
+      withGlobal(
+        () => {
+          throw new Error("boom");
+        },
+        () => assert.equal(runningChildrenCount(), 0),
+      );
     });
   });
 
@@ -2108,7 +2307,11 @@ describe("subagent-done.ts", () => {
       try {
         const tool = mock.registeredTools.find((t) => t.name === "ask_question");
         let shutdownCalled = false;
-        const ctx = { shutdown() { shutdownCalled = true; } } as any;
+        const ctx = {
+          shutdown() {
+            shutdownCalled = true;
+          },
+        } as any;
         const out = await tool.execute("call-1", { question: "Which API base URL?" }, undefined, undefined, ctx);
 
         assert.equal(shutdownCalled, false, "ask_question must keep the session open");
@@ -2139,9 +2342,17 @@ describe("subagent-done.ts", () => {
           if (!handlers.has(event)) handlers.set(event, []);
           handlers.get(event)!.push(handler);
         },
-        registerTool(t: any) { tools.push(t); },
-        registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
-        sendUserMessage() {}, sendMessage() {}, getAllTools() { return []; },
+        registerTool(t: any) {
+          tools.push(t);
+        },
+        registerCommand() {},
+        registerMessageRenderer() {},
+        registerShortcut() {},
+        sendUserMessage() {},
+        sendMessage() {},
+        getAllTools() {
+          return [];
+        },
       } as any;
       const saved = {
         session: process.env.PI_SUBAGENT_SESSION,
@@ -2154,8 +2365,7 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_AGENT = "scout";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
       subagentDoneExtension(api);
-      const emit = (event: string, ...args: any[]) =>
-        (handlers.get(event) ?? []).forEach((h) => h(...args));
+      const emit = (event: string, ...args: any[]) => (handlers.get(event) ?? []).forEach((h) => h(...args));
       const restore = () => {
         restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
         restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
@@ -2164,7 +2374,9 @@ describe("subagent-done.ts", () => {
       };
       const ask = async () => {
         const tool = tools.find((t) => t.name === "ask_question");
-        await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, { shutdown() {} });
+        await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, {
+          shutdown() {},
+        });
       };
       return { emit, ask, restore };
     }
@@ -2178,7 +2390,15 @@ describe("subagent-done.ts", () => {
         // Reply arrives MID-RUN as a steer: input fires, no new agent_start.
         emit("input");
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        emit(
+          "agent_end",
+          { messages: [] },
+          {
+            shutdown() {
+              shutdown = true;
+            },
+          },
+        );
         assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
       } finally {
         restore();
@@ -2194,7 +2414,15 @@ describe("subagent-done.ts", () => {
         await ask();
         // No input yet — the orchestrator has not replied.
         let shutdown = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown = true; } });
+        emit(
+          "agent_end",
+          { messages: [] },
+          {
+            shutdown() {
+              shutdown = true;
+            },
+          },
+        );
         assert.equal(shutdown, false, "pending question with no reply must park, not exit");
       } finally {
         restore();
@@ -2209,13 +2437,29 @@ describe("subagent-done.ts", () => {
         emit("agent_start");
         await ask();
         let shutdown1 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown1 = true; } });
+        emit(
+          "agent_end",
+          { messages: [] },
+          {
+            shutdown() {
+              shutdown1 = true;
+            },
+          },
+        );
         assert.equal(shutdown1, false, "parks while waiting");
         // Reply arrives as a fresh turn after the subagent had parked.
         emit("input");
         emit("agent_start");
         let shutdown2 = false;
-        emit("agent_end", { messages: [] }, { shutdown() { shutdown2 = true; } });
+        emit(
+          "agent_end",
+          { messages: [] },
+          {
+            shutdown() {
+              shutdown2 = true;
+            },
+          },
+        );
         assert.equal(shutdown2, true, "after the reply turn, agent_end should exit");
       } finally {
         restore();
@@ -2231,10 +2475,10 @@ describe("tmux.ts interpretExitSidecar", () => {
   it("no longer decodes ping payloads (ask_question keeps the session open instead)", () => {
     // ask_question writes a `.ask` signal, not a `.exit` ping sidecar, so an
     // unknown `type: "ping"` payload now falls through to a clean done.
-    assert.deepEqual(
-      interpretExitSidecar({ type: "ping", name: "Worker", message: "need help" }),
-      { reason: "done", exitCode: 0 },
-    );
+    assert.deepEqual(interpretExitSidecar({ type: "ping", name: "Worker", message: "need help" }), {
+      reason: "done",
+      exitCode: 0,
+    });
   });
 
   it("decodes done payloads", () => {
@@ -2296,7 +2540,11 @@ describe("commands", () => {
       label: `provider-${index}/model-${index}`,
       description: `Friendly ${index} · 32,000 ctx`,
     }));
-    items.push({ value: "__manual_model__", label: "Enter provider/model ID manually", description: "Use an ID not listed in Pi" });
+    items.push({
+      value: "__manual_model__",
+      label: "Enter provider/model ID manually",
+      description: "Use an ID not listed in Pi",
+    });
     const actions: Record<string, string> = {
       "tui.select.up": "UP",
       "tui.select.down": "DOWN",
@@ -2309,7 +2557,9 @@ describe("commands", () => {
       { fg: (_color: string, text: string) => text },
       { matches: (data: string, action: string) => data === actions[action] },
       items,
-      (value: string | undefined) => { selected = value; },
+      (value: string | undefined) => {
+        selected = value;
+      },
     );
 
     let lines = picker.render(120);
@@ -2335,7 +2585,9 @@ describe("commands", () => {
       { fg: (_color: string, text: string) => text },
       { matches: (data: string, action: string) => data === actions[action] },
       items,
-      (value: string | undefined) => { preselected = value; },
+      (value: string | undefined) => {
+        preselected = value;
+      },
       { initialValue: "provider-10/model-10", title: "Choose a model" },
     );
     savedModelPicker.handleInput("ENTER");
@@ -2346,14 +2598,41 @@ describe("commands", () => {
     const testApi = (subagentsModule as any).__test__;
     assert.deepEqual(testApi.thinkingLevelsForModel(undefined), ["off", "minimal", "low", "medium", "high", "xhigh"]);
     assert.deepEqual(testApi.thinkingLevelsForModel({ id: "unknown", reasoning: false }), ["off"]);
-    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-4o", reasoning: true }), ["off", "minimal", "low", "medium", "high"]);
-    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
-    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }, null), ["off", "minimal", "low", "medium", "high"]);
-    const selectedModel = { provider: "openai", id: "parent", name: "Parent", contextWindow: 32_000 } as any;
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-4o", reasoning: true }), [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }), [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-5.3", reasoning: true }, null), [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    const selectedModel = {
+      provider: "openai",
+      id: "parent",
+      name: "Parent",
+      contextWindow: 32_000,
+    } as any;
     assert.equal(testApi.preferredModelId(undefined, selectedModel), "openai/parent");
     const pickerItems = testApi.modelPickerItems([selectedModel], "custom/provider/model");
     assert.equal(pickerItems[0].value, "custom/provider/model");
-    assert.equal(testApi.thinkingPickerItems({ id: "gpt-4o", reasoning: true }, "xhigh").initialValue, "__pi_default_thinking__");
+    assert.equal(
+      testApi.thinkingPickerItems({ id: "gpt-4o", reasoning: true }, "xhigh").initialValue,
+      "__pi_default_thinking__",
+    );
     assert.equal(testApi.thinkingPickerItems({ id: "gpt-4o", reasoning: true }, "high").initialValue, "high");
   });
 
@@ -2374,7 +2653,15 @@ describe("commands", () => {
     const command = registeredCommands.find((entry) => entry.name === "subagents");
     assert.ok(command, "expected /subagents to be registered");
 
-    const models = [{ provider: "anthropic", id: "claude-test", name: "Claude Test", contextWindow: 200_000, reasoning: true }];
+    const models = [
+      {
+        provider: "anthropic",
+        id: "claude-test",
+        name: "Claude Test",
+        contextWindow: 200_000,
+        reasoning: true,
+      },
+    ];
     const commandCtx = {
       cwd: process.cwd(),
       mode: "tui",
@@ -2385,7 +2672,14 @@ describe("commands", () => {
           if (title === "Choose an agent") return options.find((option) => option === "scout");
           if (title === "Choose an action") return options.find((option) => option === "Spawn once");
           if (title === "Choose a model") {
-            assert.ok(options.some((option) => option.includes("Claude Test") && option.includes("anthropic/claude-test") && option.includes("200,000 ctx")));
+            assert.ok(
+              options.some(
+                (option) =>
+                  option.includes("Claude Test") &&
+                  option.includes("anthropic/claude-test") &&
+                  option.includes("200,000 ctx"),
+              ),
+            );
             return options.find((option) => option.includes("anthropic/claude-test"));
           }
           return undefined;
@@ -2497,8 +2791,10 @@ describe("commands", () => {
           return undefined;
         },
         custom: chooseFromCustomModelPicker(1),
-        input: async (title: string) => title === "Enter provider/model ID" ? "custom/provider/model" : "inspect",
-        notify(message: string, level: string) { notices.push({ message, level }); },
+        input: async (title: string) => (title === "Enter provider/model ID" ? "custom/provider/model" : "inspect"),
+        notify(message: string, level: string) {
+          notices.push({ message, level });
+        },
       },
     });
 
@@ -2526,8 +2822,10 @@ describe("commands", () => {
           return undefined;
         },
         custom: chooseFromCustomModelPicker(1),
-        input: async (title: string) => title === "Enter provider/model ID" ? "missing-provider" : undefined,
-        notify(message: string, level: string) { notices.push({ message, level }); },
+        input: async (title: string) => (title === "Enter provider/model ID" ? "missing-provider" : undefined),
+        notify(message: string, level: string) {
+          notices.push({ message, level });
+        },
       },
     });
 
@@ -2548,7 +2846,9 @@ describe("commands", () => {
       await command.handler("", {
         cwd: dir,
         mode: "tui",
-        modelRegistry: { getAvailable: () => [{ provider: "openai", id: "new", name: "New", contextWindow: 16_000, reasoning: true }] },
+        modelRegistry: {
+          getAvailable: () => [{ provider: "openai", id: "new", name: "New", contextWindow: 16_000, reasoning: true }],
+        },
         ui: {
           custom: chooseFromCustomModelPicker(1),
           select: async (title: string, options: string[]) => {
@@ -2583,8 +2883,18 @@ describe("commands", () => {
     const command = registeredCommands.find((entry) => entry.name === "subagents");
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
-    writeAgentFile(projectAgents, "local-agent", "name: local-agent\nmodel: openai/model-test\nthinking: low\ntools: read, write\nsystem-prompt: append");
-    const model = { provider: "openai", id: "model-test", name: "Test Model", contextWindow: 32_000, reasoning: true };
+    writeAgentFile(
+      projectAgents,
+      "local-agent",
+      "name: local-agent\nmodel: openai/model-test\nthinking: low\ntools: read, write\nsystem-prompt: append",
+    );
+    const model = {
+      provider: "openai",
+      id: "model-test",
+      name: "Test Model",
+      contextWindow: 32_000,
+      reasoning: true,
+    };
 
     try {
       await command.handler("", {
@@ -2623,7 +2933,13 @@ describe("commands", () => {
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
     writeAgentFile(projectAgents, "local-agent", "name: local-agent\nmodel: openai/model-test\nthinking: high");
-    const model = { provider: "openai", id: "model-test", name: "Test Model", contextWindow: 32_000, reasoning: true };
+    const model = {
+      provider: "openai",
+      id: "model-test",
+      name: "Test Model",
+      contextWindow: 32_000,
+      reasoning: true,
+    };
 
     try {
       await command.handler("", {
@@ -2688,8 +3004,14 @@ describe("commands", () => {
   it("does not register the removed /iterate or /plan commands", () => {
     const { api, registeredCommands } = createMockExtensionApi();
     (subagentsModule as any).default(api);
-    assert.equal(registeredCommands.find((c) => c.name === "iterate"), undefined);
-    assert.equal(registeredCommands.find((c) => c.name === "plan"), undefined);
+    assert.equal(
+      registeredCommands.find((c) => c.name === "iterate"),
+      undefined,
+    );
+    assert.equal(
+      registeredCommands.find((c) => c.name === "plan"),
+      undefined,
+    );
   });
 });
 
@@ -2702,7 +3024,6 @@ describe("tool registration", () => {
       interactive: false,
     });
   });
-
 
   it("rejects a top-level spawn with no agent and no fork", async () => {
     const { api, registeredTools } = createMockExtensionApi();
@@ -3379,35 +3700,38 @@ describe("subagents widget rendering", () => {
     const originalNow = Date.now;
     Date.now = () => 1_000_000;
     try {
-      const lines = testApi.renderSubagentWidgetLines([
-        {
-          id: "a1",
-          name: "A",
-          task: "",
-          surface: "s1",
-          startTime: 1_000_000 - 13_000,
-          sessionFile: "sess1",
-          statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 13_000 }),
-        },
-        {
-          id: "a2",
-          name: "B",
-          task: "",
-          surface: "s2",
-          startTime: 1_000_000 - 21_000,
-          sessionFile: "sess2",
-          statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 21_000 }),
-        },
-        {
-          id: "a3",
-          name: "C",
-          task: "",
-          surface: "s3",
-          startTime: 1_000_000 - 27_000,
-          sessionFile: "sess3",
-          statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 27_000 }),
-        },
-      ], 16);
+      const lines = testApi.renderSubagentWidgetLines(
+        [
+          {
+            id: "a1",
+            name: "A",
+            task: "",
+            surface: "s1",
+            startTime: 1_000_000 - 13_000,
+            sessionFile: "sess1",
+            statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 13_000 }),
+          },
+          {
+            id: "a2",
+            name: "B",
+            task: "",
+            surface: "s2",
+            startTime: 1_000_000 - 21_000,
+            sessionFile: "sess2",
+            statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 21_000 }),
+          },
+          {
+            id: "a3",
+            name: "C",
+            task: "",
+            surface: "s3",
+            startTime: 1_000_000 - 27_000,
+            sessionFile: "sess3",
+            statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 27_000 }),
+          },
+        ],
+        16,
+      );
 
       assert.deepEqual(
         lines.map((line: string) => visibleWidth(line)),
@@ -3421,18 +3745,23 @@ describe("subagents widget rendering", () => {
   it("shows the model and its source in active-subagent status", () => {
     const testApi = (subagentsModule as any).__test__;
     const startTime = Date.now();
-    const lines = testApi.renderSubagentWidgetLines([{
-      id: "model-agent",
-      name: "scout",
-      task: "",
-      agent: "scout",
-      model: "anthropic/claude-test",
-      modelSource: "spawn override",
-      surface: "s1",
-      startTime,
-      sessionFile: "missing-session",
-      statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
-    }], 100);
+    const lines = testApi.renderSubagentWidgetLines(
+      [
+        {
+          id: "model-agent",
+          name: "scout",
+          task: "",
+          agent: "scout",
+          model: "anthropic/claude-test",
+          modelSource: "spawn override",
+          surface: "s1",
+          startTime,
+          sessionFile: "missing-session",
+          statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+        },
+      ],
+      100,
+    );
 
     assert.match(lines[1], /anthropic\/claude-test/);
     assert.match(lines[1], /spawn override/);
@@ -3447,22 +3776,31 @@ describe("subagents widget rendering", () => {
           type: "message",
           id: "assistant-active",
           parentId: null,
-          message: { role: "assistant", model: "openai/runtime-model", content: [{ type: "text", text: "working" }] },
+          message: {
+            role: "assistant",
+            model: "openai/runtime-model",
+            content: [{ type: "text", text: "working" }],
+          },
         },
       ]);
       const startTime = Date.now();
-      const lines = testApi.renderSubagentWidgetLines([{
-        id: "model-agent",
-        name: "scout",
-        task: "",
-        agent: "scout",
-        model: null,
-        modelSource: "Pi default",
-        surface: "s1",
-        startTime,
-        sessionFile,
-        statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
-      }], 100);
+      const lines = testApi.renderSubagentWidgetLines(
+        [
+          {
+            id: "model-agent",
+            name: "scout",
+            task: "",
+            agent: "scout",
+            model: null,
+            modelSource: "Pi default",
+            surface: "s1",
+            startTime,
+            sessionFile,
+            statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+          },
+        ],
+        100,
+      );
 
       assert.match(lines[1], /openai\/runtime-model \(Pi default\)/);
     });
@@ -3485,17 +3823,20 @@ describe("subagents widget rendering", () => {
     const widths = [0, 1, 2];
     for (const width of widths) {
       const startTime = Date.now() - 5_000;
-      const lines = testApi.renderSubagentWidgetLines([
-        {
-          id: "a1",
-          name: "A",
-          task: "",
-          surface: "s1",
-          startTime,
-          sessionFile: "sess1",
-          statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
-        },
-      ], width);
+      const lines = testApi.renderSubagentWidgetLines(
+        [
+          {
+            id: "a1",
+            name: "A",
+            task: "",
+            surface: "s1",
+            startTime,
+            sessionFile: "sess1",
+            statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+          },
+        ],
+        width,
+      );
 
       for (const line of lines) {
         assert.ok(
