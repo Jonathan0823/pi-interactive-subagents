@@ -1,5 +1,10 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { authorizeToolCall, snapshotToolProviders, validateToolProviderGrants, type ResolvedToolProvider } from "./loadout.ts";
+import {
+  authorizeToolCall,
+  snapshotToolProviders,
+  validateToolProviderGrants,
+  type ResolvedToolProvider,
+} from "./loadout.ts";
 
 interface ExplicitLoadoutPolicy {
   version: 1;
@@ -81,13 +86,19 @@ export function createToolPolicyHandlers(
     },
     authorize(event: { toolName: string; parentToolCallId?: string }) {
       if (!ready) {
-        return { block: true as const, reason: startupError ?? "Explicit subagent tool policy is not ready." };
+        return {
+          block: true as const,
+          reason: startupError ?? "Explicit subagent tool policy is not ready.",
+        };
       }
       try {
         const decision = authorizeToolCall(event.toolName, effectiveGrants, getProviders());
         return decision.allowed ? undefined : { block: true as const, reason: decision.reason };
       } catch (error) {
-        return { block: true as const, reason: `Explicit subagent tool policy failed closed: ${String(error)}` };
+        return {
+          block: true as const,
+          reason: `Explicit subagent tool policy failed closed: ${String(error)}`,
+        };
       }
     },
   };
@@ -99,7 +110,9 @@ export default function subagentToolPolicy(pi: any): void {
 
   let policy: ExplicitLoadoutPolicy;
   try {
-    const parsed = JSON.parse(readFileSync(policyPath, "utf8")) as { explicitLoadout?: ExplicitLoadoutPolicy };
+    const parsed = JSON.parse(readFileSync(policyPath, "utf8")) as {
+      explicitLoadout?: ExplicitLoadoutPolicy;
+    };
     policy = parsed.explicitLoadout as ExplicitLoadoutPolicy;
     if (policy?.version !== 1 || !Array.isArray(policy.toolProviders)) {
       throw new Error("Unsupported explicit subagent loadout policy.");
@@ -112,9 +125,14 @@ export default function subagentToolPolicy(pi: any): void {
     policy.toolProviders,
     () => currentProviders(pi),
     (toolProviders) => {
-      const session = JSON.parse(readFileSync(policyPath, "utf8")) as { explicitLoadout: ExplicitLoadoutPolicy };
+      const session = JSON.parse(readFileSync(policyPath, "utf8")) as {
+        explicitLoadout: ExplicitLoadoutPolicy;
+      };
       session.explicitLoadout.toolProviders = toolProviders.map((grant) => ({ ...grant }));
-      writeFileSync(policyPath, JSON.stringify(session, null, 2), { encoding: "utf8", mode: 0o600 });
+      writeFileSync(policyPath, JSON.stringify(session, null, 2), {
+        encoding: "utf8",
+        mode: 0o600,
+      });
       chmodSync(policyPath, 0o600);
     },
     () => {
@@ -140,7 +158,10 @@ export default function subagentToolPolicy(pi: any): void {
           const failurePath = `${sessionFile}.exit`;
           writeFileSync(
             failurePath,
-            JSON.stringify({ type: "error", errorMessage: "Explicit subagent loadout rejected before model use." }),
+            JSON.stringify({
+              type: "error",
+              errorMessage: "Explicit subagent loadout rejected before model use.",
+            }),
             { encoding: "utf8", mode: 0o600 },
           );
           chmodSync(failurePath, 0o600);

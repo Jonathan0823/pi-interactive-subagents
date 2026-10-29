@@ -76,17 +76,10 @@ for (const backend of backends) {
 
       // Verify: subagent created the marker file
       const content = await waitForFile(markerFile, PI_TIMEOUT, /PASS/);
-      assert.ok(
-        content.includes(`PASS_${id}`),
-        `Marker file should contain PASS_${id}. Got: ${content.trim()}`,
-      );
+      assert.ok(content.includes(`PASS_${id}`), `Marker file should contain PASS_${id}. Got: ${content.trim()}`);
 
       // Verify: outer pi received the subagent result
-      const screen = await waitForScreen(
-        surface,
-        /INTEGRATION_COMPLETE|completed|Sub-agent.*"Echo/i,
-        PI_TIMEOUT,
-      );
+      const screen = await waitForScreen(surface, /INTEGRATION_COMPLETE|completed|Sub-agent.*"Echo/i, PI_TIMEOUT);
 
       // Verify: session file was created (shown in steer result)
       const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
@@ -214,11 +207,7 @@ for (const backend of backends) {
       assert.ok(content.includes(`FORK_OK_${id}`), `Fork marker file should exist with content`);
 
       // Wait for the outer pi to show the result
-      const screen = await waitForScreen(
-        surface,
-        /FORK_COMPLETE|completed|Sub-agent.*"Fork/i,
-        PI_TIMEOUT,
-      );
+      const screen = await waitForScreen(surface, /FORK_COMPLETE|completed|Sub-agent.*"Fork/i, PI_TIMEOUT);
 
       // Verify: the forked session has a parent link
       const sessionMatch = screen.match(/Session:\s*(\S+\.jsonl)/);
@@ -258,16 +247,9 @@ for (const backend of backends) {
 
       // The test-ping agent calls caller_ping, which steers a "needs help" message
       // back to the outer pi. Look for it on screen.
-      const screen = await waitForScreen(
-        surface,
-        /needs help|PING|caller_ping|ping/i,
-        PI_TIMEOUT,
-      );
+      const screen = await waitForScreen(surface, /needs help|PING|caller_ping|ping/i, PI_TIMEOUT);
 
-      assert.ok(
-        /needs help|PING/i.test(screen),
-        `Screen should show ping notification. Got:\n${screen.slice(-800)}`,
-      );
+      assert.ok(/needs help|PING/i.test(screen), `Screen should show ping notification. Got:\n${screen.slice(-800)}`);
     });
 
     // ── Agent discovery ──

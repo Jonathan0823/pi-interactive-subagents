@@ -9,16 +9,7 @@
  * - Clean up panes and temp files after tests
  */
 import { execFileSync } from "node:child_process";
-import {
-  mkdtempSync,
-  mkdirSync,
-  cpSync,
-  readdirSync,
-  rmSync,
-  existsSync,
-  readFileSync,
-  unlinkSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, readdirSync, rmSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -99,10 +90,7 @@ export function getFocusedSurface(): string | null {
   }
 }
 
-export async function waitForFocusedSurface(
-  surface: string,
-  timeout: number = PI_TIMEOUT,
-): Promise<void> {
+export async function waitForFocusedSurface(surface: string, timeout: number = PI_TIMEOUT): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     if (getFocusedSurface() === surface) return;
@@ -257,9 +245,7 @@ export async function waitForScreen(
   try {
     finalScreen = readScreen(surface, lines);
   } catch {}
-  throw new Error(
-    `Timeout (${timeout}ms) waiting for pattern ${pattern}.\nLast screen:\n${finalScreen.slice(-1000)}`,
-  );
+  throw new Error(`Timeout (${timeout}ms) waiting for pattern ${pattern}.\nLast screen:\n${finalScreen.slice(-1000)}`);
 }
 
 /**
@@ -280,8 +266,7 @@ export async function waitForFile(
     await sleep(2000);
   }
   throw new Error(
-    `Timeout (${timeout}ms) waiting for file: ${path}` +
-      (contentPattern ? ` matching ${contentPattern}` : ""),
+    `Timeout (${timeout}ms) waiting for file: ${path}` + (contentPattern ? ` matching ${contentPattern}` : ""),
   );
 }
 
@@ -289,10 +274,7 @@ export async function waitForFile(
  * Wait for the pi process in a surface to exit (sentinel detection).
  * Returns the exit code.
  */
-export async function waitForPiExit(
-  surface: string,
-  timeout: number = PI_TIMEOUT,
-): Promise<number> {
+export async function waitForPiExit(surface: string, timeout: number = PI_TIMEOUT): Promise<number> {
   const screen = await waitForScreen(surface, /__TEST_DONE_(\d+)__/, timeout);
   const match = screen.match(/__TEST_DONE_(\d+)__/);
   return match ? parseInt(match[1], 10) : -1;

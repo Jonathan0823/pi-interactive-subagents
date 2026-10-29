@@ -48,10 +48,7 @@ export function runningChildrenCount(): number {
   }
 }
 
-export function shouldAutoExitOnAgentEnd(
-  _userTookOver: boolean,
-  messages: any[] | undefined,
-): boolean {
+export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[] | undefined): boolean {
   // Manual input should not strand an auto-exit subagent. If the latest agent
   // turn completed normally, close the session. Escape/abort still leaves it
   // open for inspection or another prompt.
@@ -86,9 +83,7 @@ export interface SubagentErrorInfo {
  * Returns `null` when the latest assistant turn completed normally or was
  * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
  */
-export function findLatestAssistantError(
-  messages: any[] | undefined,
-): SubagentErrorInfo | null {
+export function findLatestAssistantError(messages: any[] | undefined): SubagentErrorInfo | null {
   if (!messages) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -139,31 +134,21 @@ export default function (pi: ExtensionAPI) {
           const countInfo = theme.fg("dim", ` — ${toolNames.length} available`);
           const hint = theme.fg("muted", "  (Ctrl+Alt+O to collapse)");
 
-          const toolList = toolNames
-            .map((name: string) => theme.fg("dim", name))
-            .join(theme.fg("muted", ", "));
+          const toolList = toolNames.map((name: string) => theme.fg("dim", name)).join(theme.fg("muted", ", "));
 
           let deniedLine = "";
           if (denied.length > 0) {
-            const deniedList = denied
-              .map((name: string) => theme.fg("error", name))
-              .join(theme.fg("muted", ", "));
+            const deniedList = denied.map((name: string) => theme.fg("error", name)).join(theme.fg("muted", ", "));
             deniedLine = "\n" + theme.fg("muted", "denied: ") + deniedList;
           }
 
-          const content = new Text(
-            `${agentTag}${countInfo}${hint}\n${toolList}${deniedLine}`,
-            0,
-            0,
-          );
+          const content = new Text(`${agentTag}${countInfo}${hint}\n${toolList}${deniedLine}`, 0, 0);
           box.addChild(content);
         } else {
           // Collapsed: one-line summary
           const countInfo = theme.fg("dim", ` — ${toolNames.length} tools`);
           const deniedInfo =
-            denied.length > 0
-              ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`)
-              : "";
+            denied.length > 0 ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`) : "";
           const hint = theme.fg("muted", "  (Ctrl+Alt+O to expand)");
 
           const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
@@ -243,10 +228,7 @@ export default function (pi: ExtensionAPI) {
     // turn lands.
     const hasPendingChildren = runningChildrenCount() > 0;
     const shouldExit =
-      !awaitingAnswer &&
-      !hasPendingChildren &&
-      autoExit &&
-      shouldAutoExitOnAgentEnd(userTookOver, messages);
+      !awaitingAnswer && !hasPendingChildren && autoExit && shouldAutoExitOnAgentEnd(userTookOver, messages);
 
     if (shouldExit) {
       // Surface stopReason: "error" turns (auto-retry exhausted, provider
@@ -399,10 +381,8 @@ export default function (pi: ExtensionAPI) {
 
     renderCall(args, theme) {
       const text =
-        theme.fg("toolTitle", theme.bold("ask_question ")) +
-        theme.fg("muted", String((args as any).question ?? ""));
+        theme.fg("toolTitle", theme.bold("ask_question ")) + theme.fg("muted", String((args as any).question ?? ""));
       return new Text(text, 0, 0);
     },
   });
-
 }

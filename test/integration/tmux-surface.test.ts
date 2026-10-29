@@ -90,10 +90,7 @@ for (const backend of backends) {
       await sleep(1500);
 
       const screen = readScreen(surface, 50);
-      assert.ok(
-        screen.includes(`MARKER_${marker}`),
-        `Expected screen to contain MARKER_${marker}. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes(`MARKER_${marker}`), `Expected screen to contain MARKER_${marker}. Got:\n${screen}`);
 
       closeSurface(surface);
       untrackSurface(env, surface);
@@ -109,15 +106,9 @@ for (const backend of backends) {
       await sleep(1500);
 
       const screen = readScreen(surface, 50);
-      assert.ok(
-        screen.includes(`SPEC_${marker}`),
-        `Expected special-char output. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes(`SPEC_${marker}`), `Expected special-char output. Got:\n${screen}`);
       // $ should be literal inside single quotes
-      assert.ok(
-        screen.includes("$HOME"),
-        `Expected literal $HOME in output. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes("$HOME"), `Expected literal $HOME in output. Got:\n${screen}`);
     });
 
     it("sends a long command via script file without truncation", async () => {
@@ -132,14 +123,8 @@ for (const backend of backends) {
       await sleep(2000);
 
       const screen = readScreen(surface, 50);
-      assert.ok(
-        screen.includes(`LONG_${marker}`),
-        `Expected long command output. Got:\n${screen.slice(0, 300)}...`,
-      );
-      assert.ok(
-        screen.includes("_END"),
-        `Expected full output (not truncated). Got:\n${screen.slice(-300)}`,
-      );
+      assert.ok(screen.includes(`LONG_${marker}`), `Expected long command output. Got:\n${screen.slice(0, 300)}...`);
+      assert.ok(screen.includes("_END"), `Expected full output (not truncated). Got:\n${screen.slice(-300)}`);
     });
 
     it("reads screen asynchronously", async () => {
@@ -151,10 +136,7 @@ for (const backend of backends) {
       await sleep(1500);
 
       const screen = await readScreenAsync(surface, 50);
-      assert.ok(
-        screen.includes(`ASYNC_${marker}`),
-        `Async read should find marker. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes(`ASYNC_${marker}`), `Async read should find marker. Got:\n${screen}`);
     });
 
     it("manages multiple surfaces concurrently", async () => {
