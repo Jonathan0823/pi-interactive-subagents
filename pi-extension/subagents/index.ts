@@ -50,7 +50,7 @@ import {
 import {
   appendExplicitLoadoutArgs,
   createExplicitLoadoutSnapshot,
-  fingerprintToolContract,
+  snapshotToolProviders,
   resolveExplicitLoadout,
   validateExplicitLoadoutSnapshot,
   type ExplicitLoadoutProfile,
@@ -228,17 +228,7 @@ function getRuntimeToolProviders(pi: unknown): ResolvedToolProvider[] {
   if (typeof getAllTools !== "function") {
     throw new Error("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
   }
-  return getAllTools.call(pi).map((tool) => {
-    const provider = tool.sourceInfo?.path;
-    if (typeof provider !== "string" || !provider) {
-      throw new Error(`Pi did not report a provider identity for tool "${tool.name}".`);
-    }
-    return {
-      name: tool.name,
-      provider: provider.startsWith("builtin:") ? provider : resolve(provider),
-      contractFingerprint: fingerprintToolContract(tool),
-    };
-  });
+  return snapshotToolProviders(getAllTools.call(pi));
 }
 
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */

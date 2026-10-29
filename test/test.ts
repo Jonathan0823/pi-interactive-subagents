@@ -33,7 +33,7 @@ import {
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
 import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
-import { authorizeToolCall, fingerprintExtension, resolveExplicitLoadout, validateExplicitLoadoutSnapshot, validateToolProviderGrants } from "../pi-extension/subagents/loadout.ts";
+import { authorizeToolCall, fingerprintExtension, resolveExplicitLoadout, snapshotToolProviders, validateExplicitLoadoutSnapshot, validateToolProviderGrants } from "../pi-extension/subagents/loadout.ts";
 import { createToolPolicyHandlers } from "../pi-extension/subagents/tool-policy.ts";
 import {
   advanceStatusState,
@@ -1665,6 +1665,17 @@ describe("subagent discovery", () => {
     assert.equal(parsed.tools, "read, codemode");
   });
 
+  it("normalizes tool descriptions consistently when snapshotting provider contracts", () => {
+    const common = { name: "sample_tool", sourceInfo: { path: "builtin:sample" }, parameters: {} };
+    const missingDescription = snapshotToolProviders([{ ...common }]);
+    const nonStringDescription = snapshotToolProviders([{ ...common, description: 42 }]);
+    const emptyDescription = snapshotToolProviders([{ ...common, description: "" }]);
+    assert.deepEqual(missingDescription, nonStringDescription);
+    assert.deepEqual(nonStringDescription, emptyDescription);
+    assert.equal(missingDescription[0].name, "sample_tool");
+    assert.equal(missingDescription[0].provider, "builtin:sample");
+  });
+
   it("validates pinned runtime and extension identity before resume", () => {
     const snapshot = {
       version: 1,
@@ -1680,6 +1691,21 @@ describe("subagent discovery", () => {
     assert.throws(() => validateExplicitLoadoutSnapshot(unresolved, {
       runtimeVersion: "1.4.0", requirePinnedContracts: true,
     }), /not pinned/);
+    const pinnedRunnerGrant = {
+      ...snapshot,
+      toolProviders: [{ name: "ask_question", provider: "/runner", contractFingerprint: testContract, runnerManaged: true }],
+    };
+    assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(pinnedRunnerGrant, {
+      runtimeVersion: "1.4.0", requirePinnedContracts: true,
+      currentTools: [{ name: "ask_question", provider: "/changed-parent", contractFingerprint: "different" }],
+    }));
+    assert.throws(() => validateExplicitLoadoutSnapshot({
+      ...pinnedRunnerGrant,
+      toolProviders: [{ name: "selected_tool", provider: "/extension", contractFingerprint: testContract }],
+    }, {
+      runtimeVersion: "1.4.0", requirePinnedContracts: true,
+      currentTools: [{ name: "selected_tool", provider: "/changed-parent", contractFingerprint: "different" }],
+    }), /changed provider or contract/);
   });
 
   it("applySandboxToParts explicitly loads codemode and disables MCP in strict mode", () => {

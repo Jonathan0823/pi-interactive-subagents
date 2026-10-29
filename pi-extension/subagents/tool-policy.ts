@@ -1,6 +1,5 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { authorizeToolCall, fingerprintToolContract, validateToolProviderGrants, type ResolvedToolProvider } from "./loadout.ts";
+import { authorizeToolCall, snapshotToolProviders, validateToolProviderGrants, type ResolvedToolProvider } from "./loadout.ts";
 
 interface ExplicitLoadoutPolicy {
   version: 1;
@@ -11,21 +10,7 @@ function currentProviders(pi: any): ResolvedToolProvider[] {
   if (typeof pi.getAllTools !== "function") {
     throw new Error("This Pi runtime does not expose the tool metadata required for strict subagent permissions.");
   }
-  return pi.getAllTools().map((tool: any) => {
-    const provider = tool.sourceInfo?.path;
-    if (typeof provider !== "string" || !provider) {
-      throw new Error(`Pi did not report a provider identity for tool "${tool.name}".`);
-    }
-    return {
-      name: tool.name,
-      provider: provider.startsWith("builtin:") ? provider : resolve(provider),
-      contractFingerprint: fingerprintToolContract({
-        name: tool.name,
-        description: typeof tool.description === "string" ? tool.description : "",
-        parameters: tool.parameters,
-      }),
-    };
-  });
+  return snapshotToolProviders(pi.getAllTools());
 }
 
 function assertStartupDeadline(): void {

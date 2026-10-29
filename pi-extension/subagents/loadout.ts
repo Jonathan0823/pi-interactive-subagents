@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 
 export interface ExplicitLoadoutProfile {
   /** Presence of either resource field opts into strict mode. */
@@ -56,6 +57,25 @@ function stableSerialize(value: unknown): string {
 export function fingerprintToolContract(tool: { name: string; description: string; parameters: unknown }): string {
   const contract = stableSerialize({ name: tool.name, description: tool.description, parameters: tool.parameters });
   return createHash("sha256").update(contract).digest("hex");
+}
+
+/** Snapshot runtime tools consistently in the parent and child policy. */
+export function snapshotToolProviders(tools: readonly any[]): ResolvedToolProvider[] {
+  return tools.map((tool) => {
+    const provider = tool.sourceInfo?.path;
+    if (typeof provider !== "string" || !provider) {
+      throw new Error(`Pi did not report a provider identity for tool "${tool.name}".`);
+    }
+    return {
+      name: tool.name,
+      provider: provider.startsWith("builtin:") ? provider : resolve(provider),
+      contractFingerprint: fingerprintToolContract({
+        name: tool.name,
+        description: typeof tool.description === "string" ? tool.description : "",
+        parameters: tool.parameters,
+      }),
+    };
+  });
 }
 
 export function createExplicitLoadoutSnapshot(
@@ -213,7 +233,7 @@ export function validateExplicitLoadoutSnapshot(
     throw new Error("Subagent tool contracts were not pinned; a fresh subagent spawn is required.");
   }
   if (context.currentTools) {
-    const grants = snapshot.toolProviders.filter((grant) => grant.contractFingerprint);
+    const grants = snapshot.toolProviders.filter((grant) => grant.contractFingerprint && !grant.runnerManaged);
     validateToolProviderGrants(grants, context.currentTools);
   }
   for (const file of snapshot.runnerFiles) {
