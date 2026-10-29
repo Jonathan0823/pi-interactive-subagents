@@ -8,9 +8,8 @@
  * Run inside tmux:
  *   tmux new 'npm run test:integration'
  */
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { unlinkSync } from "node:fs";
 import {
   getAvailableBackends,
   createTestEnv,
@@ -50,6 +49,17 @@ for (const backend of backends) {
       env = createTestEnv();
     });
 
+    afterEach(() => {
+      // Close panes after every case instead of accumulating them across the
+      // suite, which can leave the parent tmux window unusably narrow.
+      for (const surface of [...env.surfaces]) {
+        try {
+          closeSurface(surface);
+        } catch {}
+        untrackSurface(env, surface);
+      }
+    });
+
     after(() => {
       cleanupTestEnv(env);
     });
@@ -81,7 +91,7 @@ for (const backend of backends) {
       assert.equal(getFocusedSurface(), anchor);
     });
 
-    it("creates a surface, sends a command, reads output, and closes it", async () => {
+    it("creates a surface, reads command and file output, and closes it", async () => {
       const surface = createTrackedSurface(env, "echo-test");
       await sleep(1000);
 
@@ -91,6 +101,14 @@ for (const backend of backends) {
 
       const screen = readScreen(surface, 50);
       assert.ok(screen.includes(`MARKER_${marker}`), `Expected screen to contain MARKER_${marker}. Got:\n${screen}`);
+
+      const fileMarker = uniqueId();
+      const filePath = `/tmp/pi-tmux-test-${fileMarker}.txt`;
+      trackTempFile(env, filePath);
+      sendCommand(surface, `echo "FILE_${fileMarker}" > ${filePath} && echo "WRITTEN_${fileMarker}"`);
+      await waitForScreen(surface, new RegExp(`WRITTEN_${fileMarker}`), 10_000, 50);
+      const content = await waitForFile(filePath, 10_000, new RegExp(`FILE_${fileMarker}`));
+      assert.ok(content.includes(`FILE_${fileMarker}`), `File content wrong. Got: ${content}`);
 
       closeSurface(surface);
       untrackSurface(env, surface);
@@ -157,23 +175,5 @@ for (const backend of backends) {
       assert.ok(screen2.includes(`S2_${m2}`), `Surface 2 missing marker. Got:\n${screen2}`);
     });
 
-    it("writes output to a file and verifies via surface", async () => {
-      const surface = createTrackedSurface(env, "file-test");
-      await sleep(1000);
-
-      const marker = uniqueId();
-      const filePath = `/tmp/pi-tmux-test-${marker}.txt`;
-
-      sendCommand(surface, `echo "FILE_${marker}" > ${filePath} && echo "WRITTEN_${marker}"`);
-
-      await waitForScreen(surface, new RegExp(`WRITTEN_${marker}`), 10_000, 50);
-      const content = await waitForFile(filePath, 10_000, new RegExp(`FILE_${marker}`));
-      assert.ok(content.includes(`FILE_${marker}`), `File content wrong. Got: ${content}`);
-
-      // Clean up
-      try {
-        unlinkSync(filePath);
-      } catch {}
-    });
   });
 }
