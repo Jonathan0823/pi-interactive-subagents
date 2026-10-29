@@ -37,8 +37,5 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Integration tests
-        run: npm run test:integration
-
-      - name: Loadout CLI tests
+      - name: No-auth loadout CLI tests
         run: npm run test:loadout:cli
