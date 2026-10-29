@@ -15,7 +15,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
@@ -195,6 +195,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", () => {
+    const readinessPath = process.env.PI_SUBAGENT_READY_FILE;
+    if (readinessPath) {
+      try {
+        const state = readFileSync(readinessPath, "utf8");
+        if (state !== "validated" && state !== "ready") return { action: "handled" as const };
+      } catch {
+        return { action: "handled" as const };
+      }
+    }
     recorder.input();
     // A submitted message is the orchestrator's (or a human's) reply — the
     // pending ask_question has been answered, however it was delivered. Clear

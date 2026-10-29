@@ -96,6 +96,10 @@ description: Does something specific
 model: openrouter/z-ai/glm-5.3
 thinking: medium
 tools: read, edit, write, safe_bash, web_search
+# Optional: opt into strict provider-bound tool checks and named extensions.
+# Non-empty MCP selections are currently rejected (no selective MCP runtime).
+extensions: builtin:codemode
+mcp_servers:
 session-mode: lineage-only
 auto-exit: true
 ---
@@ -112,7 +116,9 @@ You are a specialized agent that does X...
 | `model` | string | Default model |
 | `fallback-model` | `pi-default` | Retry once with the parent session's current model after a provider/agent error. Pi CLI agents only; no retry if the parent model is unavailable or identical to the primary model |
 | `thinking` | string | `off`, `minimal`, `low`, `medium`, `high`, or `xhigh` (subject to model support); omit for Pi's configured default |
-| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `web_fetch`, `safe_bash`, `video_extract`, `youtube_search`, `google_image_search`. Only the extensions backing the listed tools are loaded into the child |
+| `tools` | string | Tool allowlist. Legacy profiles use the existing allowlist behavior. In explicit-loadout mode, exact tool names only; every direct or nested call is checked against its pinned provider and tool-contract fingerprint. |
+| `extensions` | string | Optional comma-separated exact resource names. Presence opts into strict explicit-loadout mode, even when empty. Built-in extension names are discovered from Pi's registered tools (for example `builtin:codemode`). Third-party extensions may register a stable name, entrypoint, and identity; custom registered extensions currently require the same working directory as the parent. |
+| `mcp_servers` | string | Optional comma-separated MCP server names. Presence opts into strict mode. Empty means no MCP servers. Non-empty values are rejected before spawn until Pi can safely start only selected configured servers. |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
@@ -144,7 +150,37 @@ Controls whether `stalled`/`recovered` status transitions send a steer message t
 
 ## Tool access control
 
-Access is **whitelist-only**. Every sub-agent process is launched with `--no-extensions` (extension discovery disabled) and `--tools <allowlist>`; only the extensions backing the listed tools are loaded back in explicitly. There is no default toolset and no deny-list — an agent gets exactly what its frontmatter lists. The restriction survives resume via the loadout snapshot.
+Legacy profiles (without either `extensions` or `mcp_servers`) retain their earlier behavior. In particular, legacy `--tools` is not a nested-call authorization policy.
+
+### Explicit loadouts (Pi 1.4.0+)
+
+Presence of `extensions` or `mcp_servers` selects strict mode. `extensions: builtin:codemode` explicitly loads Pi's codemode extension; list exact `tools` separately to authorize calls. For example:
+
+```markdown
+extensions: builtin:codemode
+mcp_servers:
+tools: read, grep, codemode
+```
+
+Strict mode disables extension discovery and MCP, loads only the selected built-ins/registered extensions, and authorizes every direct or codemode-mediated tool call by exact name, provider identity, and pinned tool-contract fingerprint (description and parameter schema). Unknown, ambiguous, or unselected tools fail closed. The policy checks providers again on resume and requires the same Pi runtime version. Registered file extensions are pinned by their registered identity and entrypoint digest. The enforcement controls tool calls, not arbitrary behavior inside trusted extension code or granted shell tools; this is not an OS sandbox.
+
+MCP is intentionally unavailable in strict mode for now. Any non-empty `mcp_servers` selection is rejected before spawning: Pi's current built-in MCP runtime connects all enabled servers, and this extension will not start unrelated servers or use private loader internals as a workaround. Empty `mcp_servers:` is the explicit declaration that no servers are selected. Legacy profiles are not affected.
+
+Third-party extensions can register an exact subagent resource after this extension has loaded:
+
+```ts
+(globalThis as any).__pi_interactive_subagents?.registerSubagentExtension(
+  "my-extension",
+  fileURLToPath(import.meta.url),
+  "my-extension@1.2.3",
+);
+```
+
+The identity must be a non-secret stable version/digest string and must change when the extension's code **and approved non-secret effective configuration** change. The identity is resolved from the parent's trusted registration, not from profile data; a profile cannot authenticate its own provider. Registration must be performed by an already trusted parent extension; this API does not consult Pi's trust database. Explicit custom extensions are currently supported only when the child uses the parent working directory. Pi does not expose a generic secret-safe configuration/trust fingerprint here, so do not register providers whose effective behavior depends on unpinned external settings. Pi resource configuration/trust resolution and selected-only MCP loading are not provided by this extension.
+
+Strict child startup has a 30-second readiness deadline. Provider and pinned-contract validation happens during startup, but the initial prompt remains gated through extension resource discovery; the final ready marker is written at the input boundary immediately before the prompt can reach the model. Missing or changed providers fail closed, and a child that does not become ready by the deadline is terminated. Resume revalidates the runtime, registered identity, entrypoint digest, granted tool contracts, and policy code before accepting further work. The deadline bounds startup, not arbitrary behavior after readiness; this is not an OS sandbox. An external configuration/trust fingerprint contract is still needed before using providers whose effective behavior depends on opaque external settings.
+
+Strict loadout snapshots are versioned, mode `0600`, and contain no MCP configuration or credentials. Resume fails closed if the runtime, runner policy code, selected extension identity/entrypoint, or a granted tool contract changes. An explicit profile never silently inherits parent resources. Runtime-managed `ask_question` and explicitly permitted `subagent_agents` controls remain narrowly granted.
 
 Spawns must name a known agent at **every** depth. A top-level session may spawn anything discoverable; a sub-agent may only spawn the agents in its `subagent_agents` list (enforced via `PI_SUBAGENT_ALLOWED`). There is no agentless spawn route, so a child can never escalate to a full-toolset profile by omitting its agent.
 
