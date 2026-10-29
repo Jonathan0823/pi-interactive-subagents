@@ -191,11 +191,11 @@ for (const backend of backends) {
       await sleep(1000);
 
       const task = [
-        `Call the subagent tool with these EXACT parameters:`,
+        `Call the subagent tool with these parameters:`,
+        `  agent: "test-fork"`,
         `  name: "Fork-${id}"`,
-        `  fork: true`,
         `  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-        `Do not set the agent parameter. Just set name, fork, and task.`,
+        `The test-fork agent profile selects fork session mode; do not pass a fork argument.`,
         `After you receive the result, say FORK_COMPLETE.`,
       ].join("\n");
 
