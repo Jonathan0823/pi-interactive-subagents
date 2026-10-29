@@ -1601,6 +1601,16 @@ describe("subagent discovery", () => {
           }),
         /changed provider or contract/,
       );
+      assert.throws(
+        () =>
+          validateExplicitLoadoutSnapshot(snapshot, {
+            runtimeVersion: "1.4.0",
+            registeredExtensions: registered,
+            requirePinnedContracts: true,
+            currentTools: [{ name: "sample_tool", provider: "/extensions/replaced.ts", contractFingerprint: testContract }],
+          }),
+        /changed provider or contract/,
+      );
       writeFileSync(policyPath, "export const policy = 2;", "utf8");
       assert.throws(
         () => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }),
@@ -1680,6 +1690,13 @@ describe("subagent discovery", () => {
           provider: "/extensions/web-search.ts",
           contractFingerprint: "changed",
         },
+      ]).reason ?? "",
+      /provider or contract changed/,
+    );
+    assert.match(
+      authorizeToolCall("web_search", grants, [
+        ...providers,
+        { name: "web_search", provider: "/extensions/duplicate.ts", contractFingerprint: testContract },
       ]).reason ?? "",
       /provider or contract changed/,
     );
