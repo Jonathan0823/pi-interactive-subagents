@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Keybindin
 import { DynamicBorder, keyHint } from "@mariozechner/pi-coding-agent";
 import * as piAi from "@mariozechner/pi-ai";
 import type { Model } from "@mariozechner/pi-ai";
+import { execFileSync } from "node:child_process";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Container, Input, SelectList, Spacer, Text, fuzzyFilter, truncateToWidth, visibleWidth, type SelectItem, type SelectListTheme, type TUI } from "@mariozechner/pi-tui";
 import { dirname, join, resolve } from "node:path";
@@ -33,6 +34,7 @@ import {
 import {
   countSessionEntryLines,
   findLastAssistantMessage,
+  loadoutSidecarPath,
   getNewEntries,
   getSessionId,
   readNameRegistry,
@@ -45,6 +47,17 @@ import {
   type SessionStats,
   type SubagentLoadout,
 } from "./session.ts";
+import {
+  appendExplicitLoadoutArgs,
+  createExplicitLoadoutSnapshot,
+  snapshotToolProviders,
+  resolveExplicitLoadout,
+  validateExplicitLoadoutSnapshot,
+  type ExplicitLoadoutProfile,
+  type RegisteredSubagentExtension,
+  type ResolvedToolProvider,
+} from "./loadout.ts";
+import { buildStartupDeadlineCommand, EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS } from "./startup.ts";
 import {
   type StatusSnapshot,
   type SubagentStatusState,
@@ -135,6 +148,9 @@ interface AgentDefaults {
   model?: string;
   fallbackModel?: "pi-default";
   tools?: string;
+  extensions?: string[];
+  mcpServers?: string[];
+  explicitLoadout?: boolean;
   skills?: string;
   thinking?: string;
   /**
@@ -179,7 +195,41 @@ const SPAWNING_TOOLS = [
 ] as const;
 
 /** Built-in tools pi provides natively — no extension needs to be loaded. */
-const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", "ls"]);
+const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "powershell", "grep", "find", "ls"]);
+const SUBAGENT_EXTENSION_RESOURCES = new Map<string, RegisteredSubagentExtension>();
+function getPiRuntimeVersion(): string {
+  let output: string;
+  try {
+    output = execFileSync("pi", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    throw new Error("Explicit subagent loadouts require a callable Pi CLI reporting its version.");
+  }
+  if (!/^\d+\.\d+\.\d+/.test(output)) {
+    throw new Error("Explicit subagent loadouts require a Pi CLI with a parseable semantic version.");
+  }
+  const [major, minor] = output.split(".").map(Number);
+  if (major < 1 || (major === 1 && minor < 4)) {
+    throw new Error("Explicit subagent loadouts require Pi 1.4.0 or newer.");
+  }
+  return output;
+}
+
+function getRegisteredSubagentExtensions(pi: unknown): RegisteredSubagentExtension[] {
+  const resources = new Map(SUBAGENT_EXTENSION_RESOURCES);
+  for (const tool of getRuntimeToolProviders(pi)) {
+    if (!tool.provider.startsWith("builtin:") || tool.provider === "builtin:mcp") continue;
+    resources.set(tool.provider, { name: tool.provider, path: tool.provider, identity: tool.provider });
+  }
+  return [...resources.values()];
+}
+
+function getRuntimeToolProviders(pi: unknown): ResolvedToolProvider[] {
+  const getAllTools = (pi as { getAllTools?: () => Array<any> } | null)?.getAllTools;
+  if (typeof getAllTools !== "function") {
+    throw new Error("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
+  }
+  return snapshotToolProviders(getAllTools.call(pi));
+}
 
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 function getAgentConfigDir(): string {
@@ -216,8 +266,30 @@ export function registerToolExtension(name: string, extensionPath: string): void
 // Expose registration on a process-global so project-local extensions loaded
 // via jiti (separate module instances) can reach this shared map. Set at module
 // load so it's available before any `session_start` listener runs.
+export function registerSubagentExtension(name: string, extensionPath: string, identity: string): void {
+  if (!name || name.trim() !== name || name.includes(",") || /[*?]/.test(name)) {
+    throw new Error(`Invalid subagent extension name "${name}"; use an exact name.`);
+  }
+  if (name.startsWith("builtin:")) {
+    throw new Error(`Cannot register subagent extension "${name}": builtin names are reserved.`);
+  }
+  if (!extensionPath || extensionPath.includes("\0")) {
+    throw new Error(`Invalid extension path for subagent resource "${name}".`);
+  }
+  if (!identity || identity.trim() !== identity) {
+    throw new Error(`Invalid identity for subagent resource "${name}".`);
+  }
+  const existing = SUBAGENT_EXTENSION_RESOURCES.get(name);
+  const path = extensionPath.startsWith("file:") ? fileURLToPath(extensionPath) : resolve(extensionPath);
+  if (!existsSync(path)) throw new Error(`Registered extension file does not exist for "${name}".`);
+  if (existing?.path === path && existing.identity === identity) return;
+  if (existing) throw new Error(`Subagent extension name already registered: "${name}".`);
+  SUBAGENT_EXTENSION_RESOURCES.set(name, { name, path, identity });
+}
+
 (globalThis as any).__pi_interactive_subagents = {
   registerToolExtension,
+  registerSubagentExtension,
 };
 
 /**
@@ -274,6 +346,12 @@ function parseOptionalBoolean(value: string | undefined): boolean | undefined {
   return value != null ? value === "true" : undefined;
 }
 
+function getFrontmatterList(frontmatter: string, key: string): string[] | undefined {
+  const match = frontmatter.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
+  if (!match) return undefined;
+  return match[1].split(",").map((item) => item.trim()).filter(Boolean);
+}
+
 /** Parse a comma-separated frontmatter value into a trimmed list (or undefined). */
 function parseCommaList(value: string | undefined): string[] | undefined {
   if (value == null) return undefined;
@@ -302,6 +380,9 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     model: getFrontmatterValue(frontmatter, "model"),
     fallbackModel: getFrontmatterValue(frontmatter, "fallback-model") === "pi-default" ? "pi-default" : undefined,
     tools: getFrontmatterValue(frontmatter, "tools"),
+    extensions: getFrontmatterList(frontmatter, "extensions"),
+    mcpServers: getFrontmatterList(frontmatter, "mcp_servers"),
+    explicitLoadout: /^\s*(?:extensions|mcp_servers):/m.test(frontmatter),
     systemPromptMode:
       systemPromptMode === "replace"
         ? "replace"
@@ -902,6 +983,7 @@ interface RunningSubagent {
   model?: string | null;
   modelSource?: ModelSource;
   fallbackModel?: string;
+  explicitLoadout?: SubagentLoadout["explicitLoadout"];
   actualModel?: string;
   modelFileMtimeMs?: number;
   surface: string;
@@ -1167,7 +1249,13 @@ function buildSubagentToolAllowlist(
 function applySandboxToParts(
   parts: string[],
   loadout: SubagentLoadout,
-  opts: { artifactDir: string; name: string },
+  opts: {
+    artifactDir: string;
+    name: string;
+    runtimeVersion?: string;
+    registeredExtensions?: RegisteredSubagentExtension[];
+    requirePinnedContracts?: boolean;
+  },
 ): void {
   if (loadout.model) {
     const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
@@ -1194,7 +1282,20 @@ function applySandboxToParts(
   // Default-deny: disable global extension discovery and re-enable only the
   // extensions backing the whitelisted tools. A null allowlist means the spawn
   // was intentionally unrestricted (e.g. a fork clone) and is replayed as-is.
-  if (loadout.toolAllowlist) {
+  if (loadout.explicitLoadout) {
+    validateExplicitLoadoutSnapshot(loadout.explicitLoadout, {
+      runtimeVersion: opts.runtimeVersion ?? getPiRuntimeVersion(),
+      registeredExtensions: opts.registeredExtensions ?? getRegisteredSubagentExtensions(latestPi),
+      requirePinnedContracts: opts.requirePinnedContracts,
+    });
+    appendExplicitLoadoutArgs(
+      parts,
+      loadout.explicitLoadout,
+      loadout.toolAllowlist,
+      join(SUBAGENTS_DIR, "tool-policy.ts"),
+      shellEscape,
+    );
+  } else if (loadout.toolAllowlist) {
     parts.push("--no-extensions");
     parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
@@ -1458,6 +1559,8 @@ export const __test__ = {
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
   loadAgentDefaults,
+  parseAgentDefinition,
+  registerSubagentExtension,
   preferredModelId,
   modelPickerItems,
   thinkingLevelsForModel,
@@ -1510,7 +1613,11 @@ function startWidgetRefresh() {
 async function launchSubagent(
   params: typeof SubagentParams.static,
   ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string; model?: { provider: string; id: string } },
-  options?: { surface?: string; modelSource?: ModelSource },
+  options?: {
+    surface?: string;
+    modelSource?: ModelSource;
+    explicitLoadout?: SubagentLoadout["explicitLoadout"];
+  },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
@@ -1533,6 +1640,42 @@ async function launchSubagent(
 
   const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
+  const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
+  let explicitLoadout: SubagentLoadout["explicitLoadout"] = options?.explicitLoadout;
+  if (agentDefs?.explicitLoadout && !explicitLoadout) {
+    const runtimeVersion = getPiRuntimeVersion();
+    const resolved = resolveExplicitLoadout(
+      {
+        extensions: agentDefs.extensions,
+        mcpServers: agentDefs.mcpServers,
+        tools: (effectiveTools ?? "").split(",").map((tool) => tool.trim()).filter(Boolean),
+      } satisfies ExplicitLoadoutProfile,
+      getRegisteredSubagentExtensions(latestPi),
+      getRuntimeToolProviders(latestPi),
+    );
+    if (
+      resolved.extensions.some((extension) => !extension.path.startsWith("builtin:")) &&
+      resolve(targetCwdForSession) !== resolve(ctx.cwd)
+    ) {
+      throw new Error("Registered extension references require the subagent to use the parent working directory.");
+    }
+    const managedProviders: ResolvedToolProvider[] = [
+      { name: "ask_question", provider: join(SUBAGENTS_DIR, "subagent-done.ts"), runnerManaged: true },
+    ];
+    if (grantSpawning) {
+      managedProviders.push(...SPAWNING_TOOLS.map((name) => ({ name, provider: fileURLToPath(import.meta.url), runnerManaged: true })));
+    }
+    explicitLoadout = createExplicitLoadoutSnapshot(resolved, runtimeVersion, managedProviders, [
+      fileURLToPath(import.meta.url),
+      join(SUBAGENTS_DIR, "loadout.ts"),
+      join(SUBAGENTS_DIR, "startup.ts"),
+      join(SUBAGENTS_DIR, "tool-policy.ts"),
+      join(SUBAGENTS_DIR, "subagent-done.ts"),
+    ]);
+  }
+  if (explicitLoadout && agentDefs?.cli === "claude") {
+    throw new Error("Explicit subagent loadouts are supported only by the Pi CLI runner.");
+  }
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
 
   // Generate a deterministic session file path for this subagent.
@@ -1581,7 +1724,6 @@ async function launchSubagent(
     : "Your FINAL assistant message (before the user exits) should summarize what you accomplished.";
   // An agent with a non-empty subagent_agents list is granted the spawning
   // toolset and may only spawn the listed agents (enforced via PI_SUBAGENT_ALLOWED).
-  const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
   const identity = agentDefs?.body ?? null;
   const systemPromptMode = agentDefs?.systemPromptMode;
   const identityInSystemPrompt = systemPromptMode && identity;
@@ -1690,6 +1832,7 @@ async function launchSubagent(
     agent: params.agent ?? null,
     modelSource,
     toolAllowlist,
+    explicitLoadout,
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,
@@ -1703,13 +1846,22 @@ async function launchSubagent(
 
   // Apply model/thinking, identity, and the default-deny tool/extension restriction via
   // the shared helper (same code path resume uses — they can't drift).
-  applySandboxToParts(parts, loadout, { artifactDir, name: params.name });
+  applySandboxToParts(parts, loadout, { artifactDir, name: params.name, runtimeVersion: explicitLoadout?.runtimeVersion });
+
+  // Explicit children must report policy readiness before the startup deadline.
+  const startupReadyFile = explicitLoadout ? `${subagentSessionFile}.ready` : null;
+  const startupDeadline = explicitLoadout ? Date.now() + EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS : null;
 
   // Build env prefix: subagent identity + config dir propagation + spawn allowlist
   const envParts: string[] = [];
 
   if (resolvedAgentDir) {
     envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(resolvedAgentDir)}`);
+  }
+  if (explicitLoadout && startupReadyFile && startupDeadline) {
+    envParts.push(`PI_SUBAGENT_LOADOUT_FILE=${shellEscape(loadoutSidecarPath(subagentSessionFile))}`);
+    envParts.push(`PI_SUBAGENT_READY_FILE=${shellEscape(startupReadyFile)}`);
+    envParts.push(`PI_SUBAGENT_STARTUP_DEADLINE_MS=${startupDeadline}`);
   }
 
   if (grantSpawning && agentDefs?.subagentAgents) {
@@ -1763,7 +1915,15 @@ async function launchSubagent(
   const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
 
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
-  const command = `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
+  const command = explicitLoadout && startupReadyFile
+    ? buildStartupDeadlineCommand({
+        command: `${cdPrefix}${envPrefix}exec ${parts.join(" ")}`,
+        readyFile: startupReadyFile,
+        exitFile: `${subagentSessionFile}.exit`,
+        timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
+        escape: shellEscape,
+      })
+    : `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
   const launchScriptName = `${(params.name || "subagent")
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
@@ -1789,6 +1949,7 @@ async function launchSubagent(
     model: effectiveModel ?? null,
     modelSource,
     ...(fallbackModel ? { fallbackModel } : {}),
+    ...(explicitLoadout ? { explicitLoadout } : {}),
     surface,
     startTime,
     sessionFile: subagentSessionFile,
@@ -2216,7 +2377,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           const fallback = await launchSubagent(
             { ...params, model: fallbackModel },
             ctx,
-            { modelSource: "Pi default fallback" },
+            { modelSource: "Pi default fallback", explicitLoadout: running.explicitLoadout },
           );
           registerName(parentArtifactDir, fallback.name, {
             sessionFile: fallback.sessionFile,
@@ -2541,6 +2702,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return { content: [{ type: "text" as const, text: err }], details: { error: err } };
         }
 
+        if (loadout.explicitLoadout) {
+          try {
+            validateExplicitLoadoutSnapshot(loadout.explicitLoadout, {
+              runtimeVersion: getPiRuntimeVersion(),
+              registeredExtensions: getRegisteredSubagentExtensions(latestPi),
+              requirePinnedContracts: true,
+              currentTools: getRuntimeToolProviders(latestPi),
+            });
+          } catch (error) {
+            const message = `Cannot safely resume "${requestedName}": ${String(error)} Re-run it as a fresh subagent.`;
+            return { content: [{ type: "text" as const, text: message }], details: { error: message } };
+          }
+        }
+
         const resumedSessionId = entry.sessionId ?? getSessionId(sessionPath) ?? requestedName;
 
         // Record entry count before resuming so we can extract new messages.
@@ -2564,7 +2739,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         mkdirSync(dirname(activityFile), { recursive: true });
 
         // Replay the model, identity, and default-deny tool/extension sandbox.
-        applySandboxToParts(parts, loadout, { artifactDir, name });
+        applySandboxToParts(parts, loadout, { artifactDir, name, requirePinnedContracts: true });
 
         let resumeMsgFile: string | undefined;
         if (params.message) {
@@ -2592,6 +2767,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (resumeAgentDir) {
           resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(resumeAgentDir)}`);
         }
+        const resumeReadyFile = loadout.explicitLoadout ? `${sessionPath}.resume-${id}.ready` : null;
+        const resumeDeadline = loadout.explicitLoadout ? Date.now() + EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS : null;
+        if (loadout.explicitLoadout && resumeReadyFile && resumeDeadline) {
+          resumeEnvParts.push(`PI_SUBAGENT_LOADOUT_FILE=${shellEscape(loadoutSidecarPath(sessionPath))}`);
+          resumeEnvParts.push(`PI_SUBAGENT_READY_FILE=${shellEscape(resumeReadyFile)}`);
+          resumeEnvParts.push(`PI_SUBAGENT_STARTUP_DEADLINE_MS=${resumeDeadline}`);
+        }
         if (loadout.spawnable && loadout.spawnable.length > 0) {
           resumeEnvParts.push(`PI_SUBAGENT_ALLOWED=${shellEscape(loadout.spawnable.join(","))}`);
         }
@@ -2611,7 +2793,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // operate where they did before.
         const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
-        const command = `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+        const command = loadout.explicitLoadout && resumeReadyFile
+          ? buildStartupDeadlineCommand({
+              command: `${resumeCdPrefix}${resumeEnvPrefix}exec ${parts.join(" ")}`,
+              readyFile: resumeReadyFile,
+              exitFile: `${sessionPath}.exit`,
+              timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
+              escape: shellEscape,
+            })
+          : `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
         const launchScriptFile = join(
           artifactDir,
           "subagent-scripts",

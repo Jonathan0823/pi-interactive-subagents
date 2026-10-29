@@ -1,5 +1,6 @@
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -14,6 +15,7 @@ import {
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import type { ExplicitSubagentLoadout } from "./loadout.ts";
 
 export interface SessionEntry {
   type: string;
@@ -86,14 +88,17 @@ export function seedSubagentSessionFile(params: {
  *
  * Written next to the session file as `<sessionFile>.loadout.json` at spawn
  * time. Resume replays this exact snapshot so the reincarnated process gets the
- * same `--no-extensions` + `--tools` restriction, model, identity, spawn
+ * same selected extensions, provider-bound tool grants, model, identity, spawn
  * whitelist, cwd, and config dir it originally ran with — instead of falling
- * back to pi's default (all global extensions + full toolset). Storing the
+ * back to Pi's default (all global extensions + full toolset). Strict snapshots
+ * also pin the Pi runtime version and selected extension identities. Storing the
  * resolved loadout (rather than re-deriving from the agent `.md` by name) keeps
  * resume faithful even if the agent definition is later edited, moved, or
  * deleted.
  */
 export interface SubagentLoadout {
+  /** Present only when the profile opted into strict, explicit loading. */
+  explicitLoadout?: ExplicitSubagentLoadout;
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
   /** The `--tools` allowlist string, or null when the spawn was unrestricted. */
@@ -125,11 +130,15 @@ export function loadoutSidecarPath(sessionFile: string): string {
 
 /** Persist a subagent's resolved sandbox loadout beside its session file. */
 export function writeSubagentLoadout(sessionFile: string, loadout: SubagentLoadout): void {
+  const path = loadoutSidecarPath(sessionFile);
   try {
-    writeFileSync(loadoutSidecarPath(sessionFile), JSON.stringify(loadout), "utf8");
-  } catch {
-    // Best-effort: a missing snapshot only means resume will refuse, never that
-    // it launches unrestricted.
+    writeFileSync(path, JSON.stringify(loadout), { encoding: "utf8", mode: 0o600 });
+    chmodSync(path, 0o600);
+  } catch (error) {
+    if (loadout.explicitLoadout) {
+      throw new Error(`Could not persist explicit subagent loadout safely: ${String(error)}`);
+    }
+    // Best-effort for legacy snapshots: a missing snapshot means resume refuses.
   }
 }
 

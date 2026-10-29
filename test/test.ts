@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,9 @@ import {
 } from "../pi-extension/subagents/session.ts";
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
+import { authorizeToolCall, fingerprintExtension, resolveExplicitLoadout, snapshotToolProviders, validateExplicitLoadoutSnapshot, validateToolProviderGrants } from "../pi-extension/subagents/loadout.ts";
+import { createToolPolicyHandlers } from "../pi-extension/subagents/tool-policy.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -368,6 +372,7 @@ describe("session.ts", () => {
       writeSubagentLoadout(sf, sample);
       assert.equal(loadoutSidecarPath(sf), sf + ".loadout.json");
       assert.ok(existsSync(sf + ".loadout.json"));
+      assert.equal(statSync(sf + ".loadout.json").mode & 0o777, 0o600);
     });
 
     it("round-trips the full loadout", () => {
@@ -1093,6 +1098,7 @@ describe("status.ts", () => {
 
 describe("subagent discovery", () => {
   const testApi = (subagentsModule as any).__test__;
+  const testContract = "a".repeat(64);
 
   it("loads the Pi-default fallback setting from agent frontmatter", () => {
     const dir = createTestDir();
@@ -1373,6 +1379,372 @@ describe("subagent discovery", () => {
   it("buildSubagentToolAllowlist returns null without an explicit tool restriction", () => {
     assert.equal(testApi.buildSubagentToolAllowlist(undefined), null);
     assert.equal(testApi.buildSubagentToolAllowlist(""), null);
+  });
+
+  it("resolves an explicit codemode loadout with exact provider-bound grants", () => {
+    const resolved = resolveExplicitLoadout(
+      {
+        extensions: ["builtin:codemode"],
+        mcpServers: [],
+        tools: ["read", "codemode"],
+      },
+      [{ name: "builtin:codemode", path: "builtin:codemode" }],
+      [
+        { name: "read", provider: "builtin:read", contractFingerprint: testContract },
+        { name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract },
+      ],
+    );
+
+    assert.deepEqual(resolved, {
+      extensions: [{ name: "builtin:codemode", path: "builtin:codemode", identity: "builtin:codemode" }],
+      mcpServers: [],
+      toolProviders: [
+        { name: "read", provider: "builtin:read", contractFingerprint: testContract },
+        { name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract },
+      ],
+    });
+  });
+
+  it("requires tools to come from a selected resource", () => {
+    assert.throws(
+      () => resolveExplicitLoadout(
+        { extensions: ["builtin:codemode"], mcpServers: [], tools: ["web_search"] },
+        [{ name: "builtin:codemode", path: "builtin:codemode" }],
+        [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }],
+      ),
+      /not provided by an explicitly selected resource/,
+    );
+  });
+
+  it("rejects MCP selections until isolated MCP loading is supported", () => {
+    assert.throws(
+      () => resolveExplicitLoadout(
+        { extensions: ["builtin:codemode"], mcpServers: ["context-mode"], tools: ["codemode"] },
+        [{ name: "builtin:codemode", path: "builtin:codemode" }],
+        [{ name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract }],
+      ),
+      /Selective MCP server loadouts are not supported/,
+    );
+  });
+
+  it("registers exact subagent extension names with a stable identity", () => {
+    withTempDir((dir) => {
+      const path = join(dir, "extension.ts");
+      writeFileSync(path, "export default () => undefined;", "utf8");
+      const name = `test-resource-${Date.now()}`;
+      assert.throws(() => testApi.registerSubagentExtension(`${name}-missing-identity`, path, ""), /Invalid identity/);
+      assert.doesNotThrow(() => testApi.registerSubagentExtension(name, path, "test-resource@1"));
+      assert.doesNotThrow(() => testApi.registerSubagentExtension(name, path, "test-resource@1"));
+      assert.throws(() => testApi.registerSubagentExtension(name, path, "test-resource@2"), /already registered/);
+    });
+  });
+
+  it("terminates an explicit child that does not signal startup readiness by its deadline", () => {
+    withTempDir((dir) => {
+      const readyPath = join(dir, "ready");
+      const exitPath = join(dir, "session.exit");
+      const command = buildStartupDeadlineCommand({
+        command: "exec sleep 5",
+        readyFile: readyPath,
+        exitFile: exitPath,
+        timeoutMs: 100,
+        escape: shellEscape,
+      });
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(exitPath, "utf8")), {
+        type: "error",
+        errorMessage: "Explicit subagent startup timed out before loadout readiness.",
+      });
+    });
+  });
+
+  it("stops waiting once an explicit child signals startup readiness", () => {
+    withTempDir((dir) => {
+      const readyPath = join(dir, "ready");
+      const exitPath = join(dir, "session.exit");
+      const command = buildStartupDeadlineCommand({
+        command: `printf ready > ${shellEscape(readyPath)}; exec true`,
+        readyFile: readyPath,
+        exitFile: exitPath,
+        timeoutMs: 1000,
+        escape: shellEscape,
+      });
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(readyPath, "utf8"), "ready");
+      assert.equal(existsSync(exitPath), false);
+    });
+  });
+
+  it("rejects registered extensions without a trusted identity", () => {
+    withTempDir((dir) => {
+      const path = join(dir, "extension.ts");
+      writeFileSync(path, "export default () => undefined;", "utf8");
+      assert.throws(
+        () => resolveExplicitLoadout(
+          { extensions: ["untrusted-extension"], tools: [] },
+          [{ name: "untrusted-extension", path }],
+          [],
+        ),
+        /trusted registration identity/,
+      );
+      const resolved = resolveExplicitLoadout(
+        { extensions: ["untrusted-extension"], tools: [], identity: "profile-controlled" } as any,
+        [{ name: "untrusted-extension", path, identity: "trusted-registration@1" }],
+        [],
+      );
+      assert.equal(resolved.extensions[0].identity, "trusted-registration@1");
+    });
+  });
+
+  it("pins registered extension identity and entrypoint content for resume", () => {
+    withTempDir((dir) => {
+      const path = join(dir, "plugin.ts");
+      const policyPath = join(dir, "policy.ts");
+      writeFileSync(path, "export default () => 1;", "utf8");
+      writeFileSync(policyPath, "export const policy = 1;", "utf8");
+      const resolved = resolveExplicitLoadout(
+        { extensions: ["sample-extension"], tools: ["sample_tool"] },
+        [{ name: "sample-extension", path, identity: "sample-extension@1.2.3" }],
+        [{ name: "sample_tool", provider: path, contractFingerprint: testContract }],
+      );
+      assert.equal(resolved.extensions[0].fingerprint?.length, 64);
+      const snapshot = {
+        version: 1,
+        runtimeVersion: "1.4.0",
+        extensions: resolved.extensions,
+        mcpServers: [],
+        toolProviders: resolved.toolProviders,
+        runnerFiles: [{ path: policyPath, fingerprint: fingerprintExtension(policyPath) }],
+      };
+      const registered = [{ name: "sample-extension", path, identity: "sample-extension@1.2.3" }];
+      assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(snapshot, {
+        runtimeVersion: "1.4.0", registeredExtensions: registered, requirePinnedContracts: true,
+        currentTools: resolved.toolProviders,
+      }));
+      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
+        runtimeVersion: "1.4.0",
+        registeredExtensions: [{ name: "sample-extension", path, identity: "sample-extension@1.2.4" }],
+      }), /changed identity/);
+      assert.throws(() => validateExplicitLoadoutSnapshot({
+        ...snapshot,
+        extensions: [{ name: "sample-extension", path, identity: "", fingerprint: resolved.extensions[0].fingerprint }],
+      }, { runtimeVersion: "1.4.0", registeredExtensions: registered }), /no trusted registration identity/);
+      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
+        runtimeVersion: "1.4.0", registeredExtensions: registered, requirePinnedContracts: true,
+        currentTools: [{ name: "sample_tool", provider: path, contractFingerprint: "changed" }],
+      }), /changed provider or contract/);
+      writeFileSync(policyPath, "export const policy = 2;", "utf8");
+      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }), /policy code changed/);
+      writeFileSync(path, "export default () => 2;", "utf8");
+      assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, {
+        runtimeVersion: "1.4.0", registeredExtensions: [
+          { name: "sample-extension", path, identity: "sample-extension@1.2.3" },
+        ],
+      }), /changed/);
+    });
+  });
+
+  it("treats an empty extension list as explicit strict mode", () => {
+    const resolved = resolveExplicitLoadout(
+      { extensions: [], mcpServers: [], tools: ["read"] },
+      [],
+      [{ name: "read", provider: "builtin:read", contractFingerprint: testContract }],
+    );
+    assert.equal(resolved.extensions.length, 0);
+  });
+
+  it("rejects wildcard grants and duplicate provider identities", () => {
+    assert.throws(
+      () => resolveExplicitLoadout(
+        { extensions: [], mcpServers: [], tools: ["mcp__*"] },
+        [],
+        [{ name: "mcp__ctx_search", provider: "builtin:mcp" }],
+      ),
+      /Exact tool names are required/,
+    );
+    assert.throws(
+      () => validateToolProviderGrants(
+        [{ name: "read", provider: "builtin:read" }],
+        [
+          { name: "read", provider: "builtin:read" },
+          { name: "read", provider: "builtin:read-shadow" },
+        ],
+      ),
+      /ambiguous/,
+    );
+  });
+
+  it("authorizes direct and nested calls only for the exact pinned provider", () => {
+    const grants = [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }];
+    const providers = [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: testContract }];
+    assert.deepEqual(authorizeToolCall("web_search", grants, providers), { allowed: true });
+    assert.match(authorizeToolCall("web_fetch", grants, providers).reason ?? "", /not granted/);
+    assert.match(
+      authorizeToolCall("web_search", grants, [{ name: "web_search", provider: "/extensions/other.ts", contractFingerprint: testContract }]).reason ?? "",
+      /provider or contract changed/,
+    );
+    assert.match(
+      authorizeToolCall("web_search", grants, [{ name: "web_search", provider: "/extensions/web-search.ts", contractFingerprint: "changed" }]).reason ?? "",
+      /provider or contract changed/,
+    );
+  });
+
+  it("enforces the same exact provider policy for direct and nested tool calls", () => {
+    let providers = [{ name: "read", provider: "builtin:read", contractFingerprint: testContract }];
+    const policy = createToolPolicyHandlers(
+      [{ name: "read", provider: "builtin:read", contractFingerprint: testContract }],
+      () => providers,
+    );
+    assert.equal(policy.authorize({ toolName: "read" })?.block, true);
+    policy.start({ shutdown() { assert.fail("valid provider setup should not shut down"); } });
+    assert.deepEqual(policy.handleInput(), { action: "continue" });
+    assert.equal(policy.authorize({ toolName: "read" })?.block, undefined);
+    assert.equal(policy.authorize({ toolName: "write", parentToolCallId: "codemode/1" })?.block, true);
+    providers = [{ name: "read", provider: "builtin:read-shadow", contractFingerprint: testContract }];
+    assert.equal(policy.authorize({ toolName: "read", parentToolCallId: "codemode/2" })?.block, true);
+  });
+
+  it("signals readiness only when the validated initial input is allowed", () => {
+    const provider = { name: "read", provider: "builtin:read", contractFingerprint: testContract };
+    let readinessSignals = 0;
+    const policy = createToolPolicyHandlers([provider], () => [provider], undefined, () => { readinessSignals++; });
+    assert.deepEqual(policy.handleInput(), { action: "handled" });
+    policy.start({ shutdown() { assert.fail("valid provider setup should not shut down"); } });
+    assert.equal(readinessSignals, 0);
+    assert.equal(policy.authorize({ toolName: "read" })?.block, true);
+    assert.deepEqual(policy.handleInput(), { action: "continue" });
+    assert.equal(readinessSignals, 1);
+    assert.equal(policy.authorize({ toolName: "read" })?.block, undefined);
+
+    const invalid = createToolPolicyHandlers(
+      [{ ...provider, contractFingerprint: "changed" }],
+      () => [provider],
+    );
+    invalid.start({ shutdown() {} });
+    assert.deepEqual(invalid.handleInput(), { action: "handled" });
+
+    let currentProviders = [provider];
+    let shutdownCount = 0;
+    const drifted = createToolPolicyHandlers([provider], () => currentProviders, undefined, () => { readinessSignals++; });
+    drifted.start({ shutdown() { shutdownCount++; } });
+    currentProviders = [{ ...provider, contractFingerprint: "changed" }];
+    assert.deepEqual(drifted.handleInput({ shutdown() { shutdownCount++; } }), { action: "handled" });
+    assert.equal(shutdownCount, 1, "provider drift must shut down the child before the model request");
+    assert.equal(readinessSignals, 1, "provider drift must not signal readiness");
+  });
+
+  it("pins runner-managed tool contracts on the first start and checks them thereafter", () => {
+    let pinned: readonly any[] = [];
+    let providers = [{ name: "ask_question", provider: "/runner/subagent-done.ts", contractFingerprint: testContract }];
+    const policy = createToolPolicyHandlers(
+      [{ name: "ask_question", provider: "/runner/subagent-done.ts", runnerManaged: true }],
+      () => providers,
+      (grants) => { pinned = grants; },
+    );
+    policy.start({ shutdown() { assert.fail("runner tool contract should pin successfully"); } });
+    assert.equal((pinned[0] as any).contractFingerprint, testContract);
+    assert.deepEqual(policy.handleInput(), { action: "continue" });
+    assert.equal(policy.authorize({ toolName: "ask_question" }), undefined);
+    providers = [{ name: "ask_question", provider: "/runner/subagent-done.ts", contractFingerprint: "changed" }];
+    assert.equal(policy.authorize({ toolName: "ask_question" })?.block, true);
+  });
+
+  it("parses explicit resource fields and preserves an empty-list opt-in", () => {
+    const parsed = subagentsModule.__test__.parseAgentDefinition(
+      ["---", "name: strict-test", "extensions:", "mcp_servers:", "tools: read, codemode", "---", "body"].join("\n"),
+      "strict-test",
+    );
+    assert.ok(parsed);
+    assert.equal(parsed.explicitLoadout, true);
+    assert.deepEqual(parsed.extensions, []);
+    assert.deepEqual(parsed.mcpServers, []);
+    assert.equal(parsed.tools, "read, codemode");
+  });
+
+  it("normalizes tool descriptions consistently when snapshotting provider contracts", () => {
+    const common = { name: "sample_tool", sourceInfo: { path: "builtin:sample" }, parameters: {} };
+    const missingDescription = snapshotToolProviders([{ ...common }]);
+    const nonStringDescription = snapshotToolProviders([{ ...common, description: 42 }]);
+    const emptyDescription = snapshotToolProviders([{ ...common, description: "" }]);
+    assert.deepEqual(missingDescription, nonStringDescription);
+    assert.deepEqual(nonStringDescription, emptyDescription);
+    assert.equal(missingDescription[0].name, "sample_tool");
+    assert.equal(missingDescription[0].provider, "builtin:sample");
+  });
+
+  it("validates pinned runtime and extension identity before resume", () => {
+    const snapshot = {
+      version: 1,
+      runtimeVersion: "1.4.0",
+      extensions: [{ name: "builtin:codemode", path: "builtin:codemode" }],
+      mcpServers: [],
+      toolProviders: [{ name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract }],
+      runnerFiles: [],
+    };
+    assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }));
+    assert.throws(() => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.1" }), /runtime changed/);
+    const unresolved = { ...snapshot, toolProviders: [{ name: "ask_question", provider: "/runner", runnerManaged: true }] };
+    assert.throws(() => validateExplicitLoadoutSnapshot(unresolved, {
+      runtimeVersion: "1.4.0", requirePinnedContracts: true,
+    }), /not pinned/);
+    const pinnedRunnerGrant = {
+      ...snapshot,
+      toolProviders: [{ name: "ask_question", provider: "/runner", contractFingerprint: testContract, runnerManaged: true }],
+    };
+    assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(pinnedRunnerGrant, {
+      runtimeVersion: "1.4.0", requirePinnedContracts: true,
+      currentTools: [{ name: "ask_question", provider: "/changed-parent", contractFingerprint: "different" }],
+    }));
+    assert.throws(() => validateExplicitLoadoutSnapshot({
+      ...pinnedRunnerGrant,
+      toolProviders: [{ name: "selected_tool", provider: "/extension", contractFingerprint: testContract }],
+    }, {
+      runtimeVersion: "1.4.0", requirePinnedContracts: true,
+      currentTools: [{ name: "selected_tool", provider: "/changed-parent", contractFingerprint: "different" }],
+    }), /changed provider or contract/);
+  });
+
+  it("applySandboxToParts explicitly loads codemode and disables MCP in strict mode", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "worker",
+          toolAllowlist: "read,codemode,ask_question,subagent",
+          explicitLoadout: {
+            version: 1,
+            runtimeVersion: "1.4.0",
+            extensions: [{ name: "builtin:codemode", path: "builtin:codemode", identity: "builtin:codemode" }],
+            mcpServers: [],
+            toolProviders: [
+              { name: "read", provider: "builtin:read", contractFingerprint: testContract },
+              { name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract },
+              { name: "subagent", provider: "/runner/index.ts", runnerManaged: true },
+            ],
+            runnerFiles: [],
+          },
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: false,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "worker", runtimeVersion: "1.4.0", registeredExtensions: [] },
+      );
+      assert.ok(parts.includes("--no-extensions"));
+      assert.ok(parts.includes("--no-mcp"));
+      assert.ok(parts.includes("'builtin:codemode'"));
+      assert.ok(parts.includes("'/runner/index.ts'"));
+      assert.ok(parts.some((part) => part.endsWith("tool-policy.ts'")));
+    });
   });
 
   it("applySandboxToParts replays model, identity, and default-deny tool restriction", () => {
