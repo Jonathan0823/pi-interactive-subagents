@@ -1607,7 +1607,9 @@ describe("subagent discovery", () => {
             runtimeVersion: "1.4.0",
             registeredExtensions: registered,
             requirePinnedContracts: true,
-            currentTools: [{ name: "sample_tool", provider: "/extensions/replaced.ts", contractFingerprint: testContract }],
+            currentTools: [
+              { name: "sample_tool", provider: "/extensions/replaced.ts", contractFingerprint: testContract },
+            ],
           }),
         /changed provider or contract/,
       );

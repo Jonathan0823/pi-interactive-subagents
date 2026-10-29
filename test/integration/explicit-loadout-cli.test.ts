@@ -453,7 +453,9 @@ describe("explicit loadout Pi CLI smoke", () => {
         return;
       }
       let body = "";
-      request.setEncoding("utf8").on("data", (chunk) => { body += chunk; });
+      request.setEncoding("utf8").on("data", (chunk) => {
+        body += chunk;
+      });
       request.on("end", () => {
         requests.push(JSON.parse(body));
         const chunk = (delta: object, finishReason: string | null = null) => ({
@@ -467,12 +469,20 @@ describe("explicit loadout Pi CLI smoke", () => {
         response.write(`data: ${JSON.stringify(chunk({ role: "assistant" }))}\r\n\r\n`);
         const call = scenarioCalls?.[requests.length - 1];
         if (call) {
-          response.write(`data: ${JSON.stringify(chunk({ tool_calls: [{
-            index: 0,
-            id: call.id,
-            type: "function",
-            function: { name: call.name, arguments: JSON.stringify(call.arguments) },
-          }] }))}\r\n\r\n`);
+          response.write(
+            `data: ${JSON.stringify(
+              chunk({
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: call.id,
+                    type: "function",
+                    function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+                  },
+                ],
+              }),
+            )}\r\n\r\n`,
+          );
           response.write(`data: ${JSON.stringify(chunk({}, "tool_calls"))}\r\n\r\n`);
         } else {
           response.write(`data: ${JSON.stringify(chunk({ content: "DIRECT_AND_NESTED_POLICY_OK" }))}\r\n\r\n`);
@@ -491,29 +501,35 @@ describe("explicit loadout Pi CLI smoke", () => {
       assert.ok(address && typeof address !== "string");
       const configDir = join(dir, "agent-config");
       mkdirSync(configDir, { recursive: true });
-      writeFileSync(join(configDir, "models.json"), JSON.stringify({
-        providers: {
-          openai: {
-            baseUrl: `http://127.0.0.1:${address.port}/v1`,
-            api: "openai-completions",
-            apiKey: "test-only",
-            models: [{
-              id: "probe",
-              name: "Probe",
-              contextWindow: 4096,
-              maxTokens: 128,
-              input: ["text"],
-              reasoning: false,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            }],
+      writeFileSync(
+        join(configDir, "models.json"),
+        JSON.stringify({
+          providers: {
+            openai: {
+              baseUrl: `http://127.0.0.1:${address.port}/v1`,
+              api: "openai-completions",
+              apiKey: "test-only",
+              models: [
+                {
+                  id: "probe",
+                  name: "Probe",
+                  contextWindow: 4096,
+                  maxTokens: 128,
+                  input: ["text"],
+                  reasoning: false,
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                },
+              ],
+            },
           },
-        },
-      }));
+        }),
+      );
 
       const fixturePath = join(dir, "fixture-tool.ts");
       const toolResultPath = join(dir, "fixture-tool-ran");
       const ungrantedToolResultPath = join(dir, "fixture-ungranted-ran");
-      writeFileSync(fixturePath,
+      writeFileSync(
+        fixturePath,
         `import { appendFileSync } from "node:fs";\n` +
           `import { Type } from ${JSON.stringify(import.meta.resolve("@sinclair/typebox"))};\n` +
           `export default function(pi: any) {\n` +
@@ -532,7 +548,8 @@ describe("explicit loadout Pi CLI smoke", () => {
       );
       const metadataPath = join(dir, "provider-metadata.json");
       const metadataProbePath = join(dir, "metadata-probe.ts");
-      writeFileSync(metadataProbePath,
+      writeFileSync(
+        metadataProbePath,
         `import { writeFileSync } from "node:fs";\n` +
           `import { fingerprintToolContract } from ${JSON.stringify(LOADOUT_MODULE)};\n` +
           `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => {\n` +
@@ -557,8 +574,16 @@ describe("explicit loadout Pi CLI smoke", () => {
       scenarioCalls = [
         { id: "call-direct-granted", name: "fixture_echo", arguments: { value: "direct-granted" } },
         { id: "call-direct-denied", name: "fixture_ungranted", arguments: { value: "direct-denied" } },
-        { id: "call-nested-granted", name: "codemode", arguments: { code: "return await tools.fixture_echo({ value: 'nested-granted' });" } },
-        { id: "call-nested-denied", name: "codemode", arguments: { code: "return await tools.fixture_ungranted({ value: 'nested-denied' });" } },
+        {
+          id: "call-nested-granted",
+          name: "codemode",
+          arguments: { code: "return await tools.fixture_echo({ value: 'nested-granted' });" },
+        },
+        {
+          id: "call-nested-denied",
+          name: "codemode",
+          arguments: { code: "return await tools.fixture_ungranted({ value: 'nested-denied' });" },
+        },
       ];
       const availableTools = JSON.parse(readFileSync(metadataPath, "utf8"));
       const resolved = resolveExplicitLoadout(
@@ -589,25 +614,41 @@ describe("explicit loadout Pi CLI smoke", () => {
         "--model openai/probe --print",
         shellEscape("Call fixture_echo with the value granted."),
       ].join(" ");
-      const result = await runShell(buildStartupDeadlineCommand({
-        command,
-        readyFile: readyPath,
-        exitFile: `${sessionPath}.exit`,
-        timeoutMs: 20_000,
-        escape: shellEscape,
-      }), {
-        PI_CODING_AGENT_DIR: configDir,
-        PI_SUBAGENT_LOADOUT_FILE: policyPath,
-        PI_SUBAGENT_SESSION: sessionPath,
-        PI_SUBAGENT_READY_FILE: readyPath,
-        PI_SUBAGENT_STARTUP_DEADLINE_MS: String(Date.now() + 20_000),
-      }, 25_000);
+      const result = await runShell(
+        buildStartupDeadlineCommand({
+          command,
+          readyFile: readyPath,
+          exitFile: `${sessionPath}.exit`,
+          timeoutMs: 20_000,
+          escape: shellEscape,
+        }),
+        {
+          PI_CODING_AGENT_DIR: configDir,
+          PI_SUBAGENT_LOADOUT_FILE: policyPath,
+          PI_SUBAGENT_SESSION: sessionPath,
+          PI_SUBAGENT_READY_FILE: readyPath,
+          PI_SUBAGENT_STARTUP_DEADLINE_MS: String(Date.now() + 20_000),
+        },
+        25_000,
+      );
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /DIRECT_AND_NESTED_POLICY_OK/, result.stderr);
       assert.equal(readFileSync(toolResultPath, "utf8"), "direct-granted\nnested-granted\n");
-      assert.equal(existsSync(ungrantedToolResultPath), false, "ungranted direct and codemode-nested tools must not execute");
-      assert.match(JSON.stringify(requests[2]?.messages), /not granted/i, "the direct denial should be returned to the model");
-      assert.match(JSON.stringify(requests[4]?.messages), /not granted/i, "the codemode-nested denial should be returned to the model");
+      assert.equal(
+        existsSync(ungrantedToolResultPath),
+        false,
+        "ungranted direct and codemode-nested tools must not execute",
+      );
+      assert.match(
+        JSON.stringify(requests[2]?.messages),
+        /not granted/i,
+        "the direct denial should be returned to the model",
+      );
+      assert.match(
+        JSON.stringify(requests[4]?.messages),
+        /not granted/i,
+        "the codemode-nested denial should be returned to the model",
+      );
       assert.equal(readFileSync(readyPath, "utf8"), "ready");
       assert.ok(requests.length >= 5, `Expected four tool requests and a follow-up response; got ${requests.length}.`);
     } finally {
