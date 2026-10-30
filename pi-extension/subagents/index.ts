@@ -259,7 +259,7 @@ function getRegisteredSubagentExtensions(pi: unknown): RegisteredSubagentExtensi
 function getRuntimeToolProviders(pi: unknown): ResolvedToolProvider[] {
   const getAllTools = (pi as { getAllTools?: () => Array<any> } | null)?.getAllTools;
   if (typeof getAllTools !== "function") {
-    throw new Error("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
+    throw new TypeError("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
   }
   return snapshotToolProviders(getAllTools.call(pi));
 }
@@ -306,7 +306,7 @@ export function registerToolExtension(name: string, extensionPath: string): void
 // via jiti (separate module instances) can reach this shared map. Set at module
 // load so it's available before any `session_start` listener runs.
 export function registerSubagentExtension(name: string, extensionPath: string, identity: string): void {
-  if (!name || name.trim() !== name || name.includes(",") || /[*?]/.test(name)) {
+  if (!name || name?.trim() !== name || name.includes(",") || /[*?]/.test(name)) {
     throw new Error(`Invalid subagent extension name "${name}"; use an exact name.`);
   }
   if (name.startsWith("builtin:")) {
@@ -315,7 +315,7 @@ export function registerSubagentExtension(name: string, extensionPath: string, i
   if (!extensionPath || extensionPath.includes("\0")) {
     throw new Error(`Invalid extension path for subagent resource "${name}".`);
   }
-  if (!identity || identity.trim() !== identity) {
+  if (!identity || identity?.trim() !== identity) {
     throw new Error(`Invalid identity for subagent resource "${name}".`);
   }
   const existing = SUBAGENT_EXTENSION_RESOURCES.get(name);
@@ -380,7 +380,7 @@ function getBundledAgentsDir(): string {
 }
 
 function getFrontmatterValue(frontmatter: string, key: string): string | undefined {
-  const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+  const match = new RegExp(String.raw`^${key}:\s*(.+)$`, "m").exec(frontmatter);
   return match ? match[1].trim() : undefined;
 }
 
@@ -390,9 +390,10 @@ function parseOptionalBoolean(value: string | undefined): boolean | undefined {
 
 function getFrontmatterList(frontmatter: string, key: string): string[] | undefined {
   const lines = frontmatter.split("\n");
-  const index = lines.findIndex((line) => new RegExp(`^${key}:[ \\t]*`).test(line));
+  const keyPattern = new RegExp(String.raw`^${key}:[ \t]*`);
+  const index = lines.findIndex((line) => keyPattern.test(line));
   if (index < 0) return undefined;
-  const inline = lines[index].replace(new RegExp(`^${key}:[ \\t]*`), "").trim();
+  const inline = lines[index].replace(keyPattern, "").trim();
   if (inline)
     return inline
       .split(",")
