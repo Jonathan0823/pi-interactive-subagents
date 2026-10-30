@@ -25,14 +25,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
   if (isRecord(value)) {
-    const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`).join(",")}}`;
+    const entries = Object.entries(value).toSorted(([a], [b]) => a.localeCompare(b));
+    const serializedEntries = entries.map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`).join(",");
+    return `{${serializedEntries}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
 
 function normalizedServerName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_]/g, "_");
+  return name.replaceAll(/[^\w]/gu, "_");
 }
 
 function readConfigSource(path: string, label: string): McpConfigSource | undefined {
@@ -55,13 +56,12 @@ function checkedArgs(name: string, value: unknown): string[] {
     throw new Error(`MCP server "${name}" has arguments that cannot be safely fingerprinted.`);
   }
   const args = value as string[];
-  const secretFlag = /(?:token|secret|password|api[-_]?key|authorization|credential)/i;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
+  const secretFlag = /(?:token|secret|password|api[-_]?key|authorization|credential)/iu;
+  for (const arg of args) {
     const looksLikePath = arg.startsWith("/") || arg.startsWith("./") || arg.startsWith("../");
     if (
       secretFlag.test(arg) ||
-      /\bBearer\s+\S+/i.test(arg) ||
+      /\bBearer\s+\S+/iu.test(arg) ||
       (!looksLikePath && /^[A-Za-z0-9_+/=-]{40,}$/.test(arg))
     ) {
       throw new Error(`MCP server "${name}" has secret-like arguments that cannot be safely fingerprinted.`);
@@ -70,26 +70,48 @@ function checkedArgs(name: string, value: unknown): string[] {
   return args;
 }
 
-/**
- * Fingerprint only stable, allowlisted configuration. Secret-bearing values from env, headers,
- * OAuth, URL credentials, query strings, and fragments are deliberately omitted; only env/header
- * key names and public OAuth settings participate. The returned digest is the only persisted value.
- */
-export function fingerprintMcpServerConfig(name: string, rawConfig: unknown, workingDirectory = process.cwd()): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(name) || !isRecord(rawConfig)) {
-    throw new Error(`MCP server "${name}" has an invalid configuration identity.`);
-  }
-  const config = rawConfig;
-  if (config.enabled === false) throw new Error(`MCP server "${name}" is disabled.`);
+function hasOnlyStringValues(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
+}
 
-  const command = typeof config.command === "string" && config.command.length > 0 ? config.command : undefined;
-  const url = typeof config.url === "string" && config.url.length > 0 ? config.url : undefined;
-  const hasCommand = command !== undefined;
-  const hasUrl = url !== undefined;
-  if (hasCommand === hasUrl) {
-    throw new Error(`MCP server "${name}" has an ambiguous transport configuration.`);
+function hasValidConfigValueShapes(config: Record<string, unknown>): boolean {
+  return (
+    (config.env === undefined || hasOnlyStringValues(config.env)) &&
+    (config.headers === undefined || hasOnlyStringValues(config.headers)) &&
+    (config.toolExposure === undefined || hasOnlyStringValues(config.toolExposure)) &&
+    (config.oauth === undefined || isRecord(config.oauth)) &&
+    (config.auth === undefined ||
+      (isRecord(config.auth) && Object.keys(config.auth).every((key) => key === "provider"))) &&
+    (config.description === undefined || typeof config.description === "string") &&
+    (config.enabled === undefined || typeof config.enabled === "boolean") &&
+    (config.timeout === undefined || typeof config.timeout === "number") &&
+    (config.cwd === undefined || typeof config.cwd === "string")
+  );
+}
+
+function validateOAuthConfig(name: string, oauth: unknown): void {
+  if (!isRecord(oauth)) return;
+  const oauthKeys = new Set([
+    "clientId",
+    "clientSecret",
+    "callbackPort",
+    "callbackUrl",
+    "scope",
+    "clientName",
+    "clientRegistration",
+    "authServerMetadataUrl",
+  ]);
+  if (Object.keys(oauth).some((key) => !oauthKeys.has(key))) {
+    throw new Error(`MCP server "${name}" has OAuth fields that cannot be safely fingerprinted.`);
   }
-  const transport = hasCommand ? "stdio" : "http";
+}
+
+function validateConfigShape(
+  name: string,
+  config: Record<string, unknown>,
+  hasCommand: boolean,
+  transport: "stdio" | "http",
+): void {
   const allowedKeys = new Set([
     "type",
     "command",
@@ -106,50 +128,88 @@ export function fingerprintMcpServerConfig(name: string, rawConfig: unknown, wor
     "description",
     "toolExposure",
   ]);
-  const unknownKeys = Object.keys(config).filter((key) => !allowedKeys.has(key));
-  const wrongTransportKeys = hasCommand
-    ? ["url", "headers", "oauth", "auth"].filter((key) => config[key] !== undefined)
-    : ["args", "env", "cwd"].filter((key) => config[key] !== undefined);
-  if (
-    unknownKeys.length > 0 ||
-    wrongTransportKeys.length > 0 ||
-    (config.type !== undefined && config.type !== transport)
-  ) {
+  const wrongTransportKeys = hasCommand ? ["url", "headers", "oauth", "auth"] : ["args", "env", "cwd"];
+  const hasUnsupportedFields =
+    Object.keys(config).some((key) => !allowedKeys.has(key)) ||
+    wrongTransportKeys.some((key) => config[key] !== undefined) ||
+    (config.type !== undefined && config.type !== transport);
+  if (hasUnsupportedFields) {
     throw new Error(`MCP server "${name}" has configuration fields that cannot be safely fingerprinted.`);
   }
-  if (
-    (config.env !== undefined &&
-      (!isRecord(config.env) || Object.values(config.env).some((value) => typeof value !== "string"))) ||
-    (config.headers !== undefined &&
-      (!isRecord(config.headers) || Object.values(config.headers).some((value) => typeof value !== "string"))) ||
-    (config.toolExposure !== undefined &&
-      (!isRecord(config.toolExposure) ||
-        Object.values(config.toolExposure).some((value) => typeof value !== "string"))) ||
-    (config.oauth !== undefined && !isRecord(config.oauth)) ||
-    (config.auth !== undefined &&
-      (!isRecord(config.auth) || Object.keys(config.auth).some((key) => key !== "provider"))) ||
-    (config.description !== undefined && typeof config.description !== "string") ||
-    (config.enabled !== undefined && typeof config.enabled !== "boolean") ||
-    (config.timeout !== undefined && typeof config.timeout !== "number") ||
-    (config.cwd !== undefined && typeof config.cwd !== "string")
-  ) {
+  if (!hasValidConfigValueShapes(config)) {
     throw new Error(`MCP server "${name}" has an invalid configuration shape.`);
   }
-  if (isRecord(config.oauth)) {
-    const oauthKeys = new Set([
-      "clientId",
-      "clientSecret",
-      "callbackPort",
-      "callbackUrl",
-      "scope",
-      "clientName",
-      "clientRegistration",
-      "authServerMetadataUrl",
-    ]);
-    if (Object.keys(config.oauth).some((key) => !oauthKeys.has(key))) {
-      throw new Error(`MCP server "${name}" has OAuth fields that cannot be safely fingerprinted.`);
-    }
+  validateOAuthConfig(name, config.oauth);
+}
+
+/**
+ * Fingerprint only stable, allowlisted configuration. Secret-bearing values from env, headers,
+ * OAuth, URL credentials, query strings, and fragments are deliberately omitted; only env/header
+ * key names and public OAuth settings participate. The returned digest is the only persisted value.
+ */
+function addStdioIdentity(
+  identity: Record<string, unknown>,
+  name: string,
+  config: Record<string, unknown>,
+  command: string,
+  workingDirectory: string,
+): void {
+  if (/token|secret|password|api[-_]?key|authorization|credential/iu.test(command)) {
+    throw new Error(`MCP server "${name}" has a command that cannot be safely fingerprinted.`);
   }
+  identity.type = config.type ?? "stdio";
+  identity.command = command;
+  identity.cwd = resolve(workingDirectory, typeof config.cwd === "string" ? config.cwd : ".");
+  identity.args = checkedArgs(name, config.args);
+}
+
+function addHttpIdentity(
+  identity: Record<string, unknown>,
+  name: string,
+  config: Record<string, unknown>,
+  url: string,
+): void {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(url);
+  } catch {
+    throw new Error(`MCP server "${name}" has an invalid URL.`);
+  }
+  if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password) {
+    throw new Error(`MCP server "${name}" URL cannot be safely fingerprinted.`);
+  }
+  identity.type = config.type ?? "http";
+  identity.endpoint = {
+    protocol: endpoint.protocol,
+    hostname: endpoint.hostname.toLowerCase(),
+    port: endpoint.port,
+    pathFingerprint: createHash("sha256").update(endpoint.pathname).digest("hex"),
+  };
+  const oauth = isRecord(config.oauth) ? config.oauth : {};
+  identity.oauth = Object.fromEntries(
+    ["clientId", "callbackPort", "callbackUrl", "scope", "clientName", "clientRegistration", "authServerMetadataUrl"]
+      .filter((key) => oauth[key] !== undefined)
+      .map((key) => [key, oauth[key]]),
+  );
+  identity.authProvider = isRecord(config.auth) ? (config.auth.provider ?? null) : null;
+}
+
+export function fingerprintMcpServerConfig(name: string, rawConfig: unknown, workingDirectory = process.cwd()): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || !isRecord(rawConfig)) {
+    throw new Error(`MCP server "${name}" has an invalid configuration identity.`);
+  }
+  const config = rawConfig;
+  if (config.enabled === false) throw new Error(`MCP server "${name}" is disabled.`);
+
+  const command = typeof config.command === "string" && config.command.length > 0 ? config.command : undefined;
+  const url = typeof config.url === "string" && config.url.length > 0 ? config.url : undefined;
+  const hasCommand = command !== undefined;
+  const hasUrl = url !== undefined;
+  if (hasCommand === hasUrl) {
+    throw new Error(`MCP server "${name}" has an ambiguous transport configuration.`);
+  }
+  const transport = hasCommand ? "stdio" : "http";
+  validateConfigShape(name, config, hasCommand, transport);
 
   const identity: Record<string, unknown> = {
     name,
@@ -159,47 +219,16 @@ export function fingerprintMcpServerConfig(name: string, rawConfig: unknown, wor
     exposure: config.exposure ?? "codemode",
     description: config.description ?? null,
     toolExposure: config.toolExposure ?? {},
-    envKeys: isRecord(config.env) ? Object.keys(config.env).sort() : [],
+    envKeys: isRecord(config.env) ? Object.keys(config.env).toSorted((a, b) => a.localeCompare(b)) : [],
     headerKeys: isRecord(config.headers)
       ? Object.keys(config.headers)
           .map((key) => key.toLowerCase())
-          .sort()
+          .toSorted((a, b) => a.localeCompare(b))
       : [],
   };
 
-  if (command !== undefined) {
-    if (/token|secret|password|api[-_]?key|authorization|credential/i.test(command)) {
-      throw new Error(`MCP server "${name}" has a command that cannot be safely fingerprinted.`);
-    }
-    identity.type = config.type ?? "stdio";
-    identity.command = command;
-    identity.cwd = resolve(workingDirectory, typeof config.cwd === "string" ? config.cwd : ".");
-    identity.args = checkedArgs(name, config.args);
-  } else {
-    let endpoint: URL;
-    try {
-      endpoint = new URL(url as string);
-    } catch {
-      throw new Error(`MCP server "${name}" has an invalid URL.`);
-    }
-    if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password) {
-      throw new Error(`MCP server "${name}" URL cannot be safely fingerprinted.`);
-    }
-    identity.type = config.type ?? "http";
-    identity.endpoint = {
-      protocol: endpoint.protocol,
-      hostname: endpoint.hostname.toLowerCase(),
-      port: endpoint.port,
-      pathFingerprint: createHash("sha256").update(endpoint.pathname).digest("hex"),
-    };
-    const oauth = isRecord(config.oauth) ? config.oauth : {};
-    identity.oauth = Object.fromEntries(
-      ["clientId", "callbackPort", "callbackUrl", "scope", "clientName", "clientRegistration", "authServerMetadataUrl"]
-        .filter((key) => oauth[key] !== undefined)
-        .map((key) => [key, oauth[key]]),
-    );
-    identity.authProvider = isRecord(config.auth) ? (config.auth.provider ?? null) : null;
-  }
+  if (command !== undefined) addStdioIdentity(identity, name, config, command, workingDirectory);
+  else addHttpIdentity(identity, name, config, url as string);
 
   return createHash("sha256").update(stableSerialize(identity)).digest("hex");
 }
@@ -224,9 +253,7 @@ export function resolveMcpServerIdentities(
 
   return names.map((name) => {
     const configured = sources.flatMap((source) =>
-      Object.prototype.hasOwnProperty.call(source.servers, name)
-        ? [{ label: source.label, config: source.servers[name] }]
-        : [],
+      Object.hasOwn(source.servers, name) ? [{ label: source.label, config: source.servers[name] }] : [],
     );
     const registered = (options.registeredServers ?? []).filter((server) => server.name === name);
     const matches = [
