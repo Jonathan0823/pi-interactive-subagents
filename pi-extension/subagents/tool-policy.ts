@@ -35,7 +35,7 @@ function assertStartupDeadline(): void {
   }
 }
 
-function writeReadinessState(path: string, state: "validated" | "ready"): void {
+function writeReadinessState(path: string, state: "pending" | "validated" | "ready"): void {
   writeFileSync(path, state, { encoding: "utf8", mode: 0o600 });
   chmodSync(path, 0o600);
 }
@@ -48,23 +48,35 @@ export function createToolPolicyHandlers(
   onValidated?: () => void,
   validateMcpConfiguration?: () => void,
   childOnlyExtensionPaths: readonly string[] = [],
+  onPending?: () => void,
 ) {
   const effectiveGrants = grants.map((grant) => ({ ...grant }));
   const hasMcpGrants = effectiveGrants.some((grant) => Boolean(grant.mcpServer));
+  const deferredChildOnlyGrants = new Set<ResolvedToolProvider>();
   let validated = false;
   let ready = false;
   let startupError: string | undefined;
   return {
     start(ctx: { shutdown(): void }): string | undefined {
+      deferredChildOnlyGrants.clear();
       try {
         validateMcpConfiguration?.();
         const providers = getProviders();
         let pinned = false;
         for (const grant of effectiveGrants) {
-          if (grant.contractFingerprint) continue;
-          if (!grant.runnerManaged) throw new Error(`Tool grant "${grant.name}" has no pinned contract.`);
           const matches = providers.filter((provider) => provider.name === grant.name);
+          if (grant.contractFingerprint) {
+            if (childOnlyExtensionPaths.includes(grant.provider) && matches.length === 0) {
+              deferredChildOnlyGrants.add(grant);
+            }
+            continue;
+          }
+          if (!grant.runnerManaged) throw new Error(`Tool grant "${grant.name}" has no pinned contract.`);
           if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) {
+            if (matches.length === 0) {
+              deferredChildOnlyGrants.add(grant);
+              continue;
+            }
             if (
               matches.length !== 1 ||
               !childOnlyExtensionPaths.includes(matches[0].provider) ||
@@ -84,12 +96,16 @@ export function createToolPolicyHandlers(
           pinned = true;
         }
         validateToolProviderGrants(
-          hasMcpGrants ? effectiveGrants.filter((grant) => !grant.mcpServer) : effectiveGrants,
+          effectiveGrants.filter((grant) => !grant.mcpServer && !deferredChildOnlyGrants.has(grant)),
           providers,
         );
         if (pinned) onPinned?.(effectiveGrants);
-        onValidated?.();
-        validated = true;
+        if (deferredChildOnlyGrants.size === 0 && !hasMcpGrants) {
+          onValidated?.();
+          validated = true;
+        } else {
+          onPending?.();
+        }
         return undefined;
       } catch (error) {
         startupError = String(error);
@@ -98,36 +114,13 @@ export function createToolPolicyHandlers(
       }
     },
     handleInput(ctx?: { shutdown(): void }) {
-      if (!validated) return { action: "handled" as const };
-      if (!hasMcpGrants && ready) return { action: "continue" as const };
-      if (hasMcpGrants) {
-        return (async () => {
-          try {
-            const deadline = Number(process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS);
-            while (true) {
-              const providers = getProviders();
-              const pending = effectiveGrants.filter(
-                (grant) => grant.mcpServer && !providers.some((provider) => provider.name === grant.name),
-              );
-              if (pending.length === 0) {
-                validateToolProviderGrants(effectiveGrants, providers);
-                break;
-              }
-              if (!Number.isSafeInteger(deadline) || deadline <= 0 || Date.now() >= deadline) {
-                throw new Error(`Granted MCP tool "${pending[0].name}" is unavailable.`);
-              }
-              await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
-            }
-            if (!ready) onReady?.();
-            ready = true;
-            return { action: "continue" as const };
-          } catch (error) {
-            startupError = String(error);
-            ctx?.shutdown();
-            return { action: "handled" as const };
-          }
-        })();
+      if (startupError) return { action: "handled" as const };
+      if (!validated) {
+        return deferredChildOnlyGrants.size > 0 || hasMcpGrants
+          ? { action: "continue" as const }
+          : { action: "handled" as const };
       }
+      if (ready || hasMcpGrants) return { action: "continue" as const };
       try {
         validateToolProviderGrants(effectiveGrants, getProviders());
         onReady?.();
@@ -137,6 +130,65 @@ export function createToolPolicyHandlers(
         startupError = String(error);
         ctx?.shutdown();
         return { action: "handled" as const };
+      }
+    },
+    async beforeAgentStart(ctx?: { shutdown(): void }): Promise<string | undefined> {
+      if (ready || (deferredChildOnlyGrants.size === 0 && !hasMcpGrants)) return undefined;
+      try {
+        const deadline = Number(process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS);
+        if (!Number.isSafeInteger(deadline) || deadline <= 0) {
+          throw new Error("Explicit subagent startup deadline is missing or invalid.");
+        }
+        let pinned = false;
+        while (true) {
+          const providers = getProviders();
+          const pendingChildOnly: ResolvedToolProvider[] = [];
+          for (const grant of deferredChildOnlyGrants) {
+            const matches = providers.filter((provider) => provider.name === grant.name);
+            if (matches.length > 1) throw new Error(`Child-only extension tool "${grant.name}" has ambiguous providers.`);
+            if (matches.length === 0) {
+              pendingChildOnly.push(grant);
+              continue;
+            }
+            const provider = matches[0];
+            if (!childOnlyExtensionPaths.includes(provider.provider) || !provider.contractFingerprint) {
+              throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
+            }
+            if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) grant.provider = provider.provider;
+            else if (grant.provider !== provider.provider) {
+              throw new Error(`Child-only extension tool "${grant.name}" changed provider.`);
+            }
+            if (!grant.contractFingerprint) {
+              grant.contractFingerprint = provider.contractFingerprint;
+              pinned = true;
+            }
+          }
+          const pendingMcp = hasMcpGrants
+            ? effectiveGrants.filter(
+                (grant) => grant.mcpServer && !providers.some((provider) => provider.name === grant.name),
+              )
+            : [];
+          if (pendingChildOnly.length === 0 && pendingMcp.length === 0) {
+            validateToolProviderGrants(effectiveGrants, providers);
+            break;
+          }
+          if (Date.now() >= deadline) {
+            const pending = pendingChildOnly[0] ?? pendingMcp[0];
+            throw new Error(`Granted tool "${pending.name}" is unavailable.`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+        }
+        if (pinned) onPinned?.(effectiveGrants);
+        onValidated?.();
+        validated = true;
+        if (!ready) onReady?.();
+        ready = true;
+        deferredChildOnlyGrants.clear();
+        return undefined;
+      } catch (error) {
+        startupError = String(error);
+        ctx?.shutdown();
+        return startupError;
       }
     },
     failureReason(): string | undefined {
@@ -233,6 +285,12 @@ export default function subagentToolPolicy(pi: any): void {
       }
     },
     (policy.subagentOnlyExtensions ?? []).map((extension) => extension.path),
+    () => {
+      const readinessPath = process.env.PI_SUBAGENT_READY_FILE;
+      if (!readinessPath) return;
+      assertStartupDeadline();
+      writeReadinessState(readinessPath, "pending");
+    },
   );
   pi.on("session_start", (_event: unknown, ctx: any) => {
     const error = handlers.start({ shutdown: () => ctx.shutdown() });
@@ -246,7 +304,7 @@ export default function subagentToolPolicy(pi: any): void {
             failurePath,
             JSON.stringify({
               type: "error",
-              errorMessage: "Explicit subagent loadout rejected before model use.",
+              errorMessage: `Explicit subagent loadout rejected before model use: ${error}`,
             }),
             { encoding: "utf8", mode: 0o600 },
           );
@@ -255,6 +313,27 @@ export default function subagentToolPolicy(pi: any): void {
           // The child still shuts down; failure to report it must not make it runnable.
         }
       }
+    }
+  });
+  pi.on("before_agent_start", async (_event: unknown, ctx: any) => {
+    const error = await handlers.beforeAgentStart({ shutdown: () => ctx.shutdown() });
+    if (!error) return;
+    console.error(`Explicit subagent loadout rejected before model use: ${error}`);
+    const sessionFile = process.env.PI_SUBAGENT_SESSION;
+    if (!sessionFile) return;
+    try {
+      const failurePath = `${sessionFile}.exit`;
+      writeFileSync(
+        failurePath,
+        JSON.stringify({
+          type: "error",
+          errorMessage: `Explicit subagent loadout rejected before model use: ${error}`,
+        }),
+        { encoding: "utf8", mode: 0o600 },
+      );
+      chmodSync(failurePath, 0o600);
+    } catch {
+      // The child still shuts down; failure to report it must not make it runnable.
     }
   });
   pi.on("input", async (_event: unknown, ctx: any) => {
@@ -268,7 +347,10 @@ export default function subagentToolPolicy(pi: any): void {
           const failurePath = `${sessionFile}.exit`;
           writeFileSync(
             failurePath,
-            JSON.stringify({ type: "error", errorMessage: "Explicit subagent loadout rejected before model use." }),
+            JSON.stringify({
+              type: "error",
+              errorMessage: `Explicit subagent loadout rejected before model use: ${reason}`,
+            }),
             { encoding: "utf8", mode: 0o600 },
           );
           chmodSync(failurePath, 0o600);

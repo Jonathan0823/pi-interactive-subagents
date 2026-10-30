@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createExplicitLoadoutSnapshot,
+  CHILD_ONLY_EXTENSION_PROVIDER,
   fingerprintExtension,
   resolveExplicitLoadout,
 } from "../../pi-extension/subagents/loadout.ts";
@@ -276,6 +277,61 @@ describe("explicit loadout Pi CLI smoke", () => {
       assert.ok(
         modelRequestCount() > 0,
         `the ready child should reach the local model endpoint: ${requests.join(", ")}`,
+      );
+      const requestsBeforeLazyRun = modelRequestCount();
+
+      const lazyToolPath = join(dir, "lazy-tool.ts");
+      writeFileSync(
+        lazyToolPath,
+        `export default function(pi: any) {\n` +
+          `  pi.on("before_agent_start", () => {\n` +
+          `    pi.registerTool({ name: "lazy_tool", label: "lazy_tool", description: "test tool", parameters: { type: "object", properties: {} }, async execute() { return { content: [{ type: "text", text: "ok" }], details: {} }; } });\n` +
+          `  });\n` +
+          `}\n`,
+        "utf8",
+      );
+      const lazyPolicyPath = join(dir, "lazy-loadout.json");
+      writeFileSync(
+        lazyPolicyPath,
+        JSON.stringify({
+          explicitLoadout: {
+            version: 1,
+            subagentOnlyExtensions: [{ path: lazyToolPath, fingerprint: fingerprintExtension(lazyToolPath) }],
+            toolProviders: [{ name: "lazy_tool", provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true }],
+          },
+        }),
+      );
+      const lazyReadyPath = join(dir, "lazy.ready");
+      const lazySessionPath = join(dir, "lazy.jsonl");
+      const lazyCommand = [
+        "exec pi --no-session --no-extensions --tools lazy_tool",
+        `-e ${shellEscape(SUBAGENT_DONE)} -e ${shellEscape(lazyToolPath)} -e ${shellEscape(TOOL_POLICY)}`,
+        "--model openai/probe --print",
+        shellEscape("Say only PROBE_OK"),
+      ].join(" ");
+      const lazyRun = await runShell(
+        buildStartupDeadlineCommand({
+          command: lazyCommand,
+          readyFile: lazyReadyPath,
+          exitFile: `${lazySessionPath}.exit`,
+          timeoutMs: 5000,
+          escape: shellEscape,
+        }),
+        {
+          ...env,
+          PI_SUBAGENT_LOADOUT_FILE: lazyPolicyPath,
+          PI_SUBAGENT_SESSION: lazySessionPath,
+          PI_SUBAGENT_READY_FILE: lazyReadyPath,
+          PI_SUBAGENT_STARTUP_DEADLINE_MS: String(Date.now() + 5000),
+        },
+        12_000,
+      );
+      assert.equal(lazyRun.status, 0, lazyRun.stderr);
+      assert.match(lazyRun.stdout, /PROBE_OK/, lazyRun.stderr);
+      assert.equal(readFileSync(lazyReadyPath, "utf8"), "ready");
+      assert.ok(
+        modelRequestCount() > requestsBeforeLazyRun,
+        `a child-only tool registered in before_agent_start must unblock its first prompt: ${requests.join(", ")}`,
       );
       const requestsAfterSuccessfulRun = modelRequestCount();
 

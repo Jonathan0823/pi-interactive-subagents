@@ -36,6 +36,7 @@ import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.t
 import {
   appendExplicitLoadoutArgs,
   authorizeToolCall,
+  CHILD_ONLY_EXTENSION_PROVIDER,
   createExplicitLoadoutSnapshot,
   fingerprintExtension,
   resolveExplicitLoadout,
@@ -65,6 +66,7 @@ import {
 } from "../pi-extension/subagents/activity.ts";
 import {
   shouldMarkUserTookOver,
+  shouldBlockSubagentInputForLoadout,
   shouldAutoExitOnAgentEnd,
   findLatestAssistantError,
   runningChildrenCount,
@@ -1847,6 +1849,24 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("preserves a child's loadout failure instead of replacing it with a startup timeout", () => {
+    withTempDir((dir) => {
+      const readyPath = join(dir, "ready");
+      const exitPath = join(dir, "session.exit");
+      const childError = { type: "error", errorMessage: "Granted tool \\\"ffgrep\\\" is unavailable." };
+      const command = buildStartupDeadlineCommand({
+        command: `printf '%s' ${shellEscape(JSON.stringify(childError))} > ${shellEscape(exitPath)}; exec sleep 5`,
+        readyFile: readyPath,
+        exitFile: exitPath,
+        timeoutMs: 500,
+        escape: shellEscape,
+      });
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.error, undefined);
+      assert.deepEqual(JSON.parse(readFileSync(exitPath, "utf8")), childError);
+    });
+  });
+
   it("stops waiting once an explicit child signals startup readiness", () => {
     withTempDir((dir) => {
       const readyPath = join(dir, "ready");
@@ -2102,6 +2122,66 @@ describe("subagent discovery", () => {
     assert.equal(policy.authorize({ toolName: "web_search" }), undefined);
   });
 
+  it("defers child-only extension readiness until before_agent_start", async () => {
+    const extensionPath = "/child/extensions/context-mode.js";
+    const grant = { name: "ctx_execute", provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true };
+    let providers: any[] = [];
+    let pinned: readonly any[] = [];
+    let validatedSignals = 0;
+    let readinessSignals = 0;
+    const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+    process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);
+    try {
+      const policy = createToolPolicyHandlers(
+        [grant],
+        () => providers,
+        (grants) => {
+          pinned = grants;
+        },
+        () => readinessSignals++,
+        () => validatedSignals++,
+        undefined,
+        [extensionPath],
+      );
+
+      assert.equal(policy.start({ shutdown: () => assert.fail("child-only provider may register later") }), undefined);
+      assert.equal(validatedSignals, 0);
+      assert.deepEqual(policy.handleInput(), { action: "continue" });
+      assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
+
+      providers = [{ name: grant.name, provider: extensionPath, contractFingerprint: testContract }];
+      assert.equal(await policy.beforeAgentStart({ shutdown: () => assert.fail("provider should validate") }), undefined);
+      assert.equal(pinned[0]?.provider, extensionPath);
+      assert.equal(pinned[0]?.contractFingerprint, testContract);
+      assert.equal(validatedSignals, 1);
+      assert.equal(readinessSignals, 1);
+      assert.equal(policy.authorize({ toolName: grant.name }), undefined);
+    } finally {
+      if (previousDeadline === undefined) delete process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+      else process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = previousDeadline;
+    }
+  });
+
+  it("defers pinned child-only extension tools on resume until before_agent_start", async () => {
+    const extensionPath = "/child/extensions/context-mode.js";
+    const grant = { name: "ctx_execute", provider: extensionPath, contractFingerprint: testContract };
+    let providers: any[] = [];
+    const policy = createToolPolicyHandlers([grant], () => providers, undefined, undefined, undefined, undefined, [extensionPath]);
+    const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+    process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);
+    try {
+      assert.equal(policy.start({ shutdown: () => assert.fail("child-only tool should be awaited") }), undefined);
+      assert.deepEqual(policy.handleInput(), { action: "continue" });
+
+      providers = [{ ...grant }];
+      assert.equal(await policy.beforeAgentStart({ shutdown: () => assert.fail("pinned provider should validate") }), undefined);
+      assert.equal(policy.authorize({ toolName: grant.name }), undefined);
+    } finally {
+      if (previousDeadline === undefined) delete process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+      else process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = previousDeadline;
+    }
+  });
+
   it("signals readiness only when the validated initial input is allowed", () => {
     const provider = { name: "read", provider: "builtin:read", contractFingerprint: testContract };
     let readinessSignals = 0;
@@ -2177,18 +2257,27 @@ describe("subagent discovery", () => {
     process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);
     try {
       policy.start({ shutdown: () => assert.fail("MCP tool startup may still be connecting") });
-      const pendingInput = policy.handleInput();
+      assert.deepEqual(policy.handleInput(), { action: "continue" });
       assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
 
+      const pendingReadiness = policy.beforeAgentStart();
       providers = [grant];
-      assert.deepEqual(await pendingInput, { action: "continue" });
+      assert.equal(await pendingReadiness, undefined);
       assert.equal(readinessSignals, 1);
       assert.equal(policy.authorize({ toolName: grant.name })?.block, undefined);
 
       providers = [];
-      process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 1);
-      assert.deepEqual(await policy.handleInput(), { action: "handled" });
-      assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
+      let shutdownCount = 0;
+      const unavailable = createToolPolicyHandlers([grant], () => providers);
+      process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 50);
+      unavailable.start({ shutdown: () => assert.fail("MCP tool startup may still be connecting") });
+      assert.deepEqual(unavailable.handleInput(), { action: "continue" });
+      assert.match(
+        (await unavailable.beforeAgentStart({ shutdown: () => shutdownCount++ })) ?? "",
+        /Granted tool "mcp__selected__read" is unavailable/,
+      );
+      assert.equal(shutdownCount, 1);
+      assert.equal(unavailable.authorize({ toolName: grant.name })?.block, true);
     } finally {
       if (previousDeadline === undefined) delete process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
       else process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = previousDeadline;
@@ -2600,6 +2689,16 @@ describe("subagent discovery", () => {
   });
 });
 describe("subagent-done.ts", () => {
+  describe("shouldBlockSubagentInputForLoadout", () => {
+    it("allows only one initial prompt while policy validation is pending", () => {
+      assert.equal(shouldBlockSubagentInputForLoadout("pending", false), false);
+      assert.equal(shouldBlockSubagentInputForLoadout("pending", true), true);
+      assert.equal(shouldBlockSubagentInputForLoadout("validated", true), false);
+      assert.equal(shouldBlockSubagentInputForLoadout("ready", true), false);
+      assert.equal(shouldBlockSubagentInputForLoadout(undefined, false), true);
+    });
+  });
+
   describe("shouldMarkUserTookOver", () => {
     it("ignores the initial injected task before the first agent run", () => {
       assert.equal(shouldMarkUserTookOver(false), false);

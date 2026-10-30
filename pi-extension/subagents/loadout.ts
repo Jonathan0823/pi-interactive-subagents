@@ -164,6 +164,7 @@ export function appendExplicitLoadoutArgs(
       parts.push("-e", escape(grant.provider));
     }
   }
+  // Load policy last so its before_agent_start validation follows async tool registration by selected extensions.
   parts.push("-e", escape(policyExtensionPath));
 }
 

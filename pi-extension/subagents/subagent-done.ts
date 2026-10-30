@@ -18,6 +18,14 @@ import { Type } from "@sinclair/typebox";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
+export function shouldBlockSubagentInputForLoadout(
+  state: string | undefined,
+  initialInputConsumed: boolean,
+): boolean {
+  if (state === "validated" || state === "ready") return false;
+  return state !== "pending" || initialInputConsumed;
+}
+
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
 }
@@ -163,6 +171,7 @@ export default function (pi: ExtensionAPI) {
 
   let userTookOver = false;
   let agentStarted = false;
+  let initialInputConsumed = false;
   // Set when ask_question is called; suppresses auto-exit so the session stays
   // open while it waits for the orchestrator's reply. Cleared when the reply
   // lands — on `input` (covers a reply steered into the current run) and on
@@ -182,12 +191,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", () => {
     const readinessPath = process.env.PI_SUBAGENT_READY_FILE;
     if (readinessPath) {
+      let state: string | undefined;
       try {
-        const state = readFileSync(readinessPath, "utf8");
-        if (state !== "validated" && state !== "ready") return { action: "handled" as const };
+        state = readFileSync(readinessPath, "utf8");
       } catch {
+        state = undefined;
+      }
+      if (shouldBlockSubagentInputForLoadout(state, initialInputConsumed)) {
         return { action: "handled" as const };
       }
+      if (state === "pending") initialInputConsumed = true;
     }
     recorder.input();
     // A submitted message is the orchestrator's (or a human's) reply — the
