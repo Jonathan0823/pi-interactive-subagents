@@ -9,21 +9,23 @@
  * - Clean up panes and temp files after tests
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, readdirSync, rmSync, existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  accessSync,
+  constants,
+  mkdtempSync,
+  mkdirSync,
+  cpSync,
+  readdirSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  unlinkSync,
+} from "node:fs";
+import { delimiter, isAbsolute, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import {
-  isMuxAvailable,
-  createSurface,
-  createSurfaceSplit,
-  sendCommand,
-  sendLongCommand,
-  readScreen,
-  readScreenAsync,
-  closeSurface,
-  shellEscape,
-} from "../../pi-extension/subagents/tmux.ts";
+import { isMuxAvailable, readScreen, readScreenAsync } from "../../pi-extension/subagents/tmux.ts";
 
 // Re-export tmux primitives for tests
 export {
@@ -35,7 +37,7 @@ export {
   readScreenAsync,
   closeSurface,
   shellEscape,
-};
+} from "../../pi-extension/subagents/tmux.ts";
 
 // ── Paths ──
 
@@ -74,13 +76,30 @@ export function getAvailableBackends(): string[] {
   return isMuxAvailable() ? ["tmux"] : [];
 }
 
+function getTmuxExecutable(): string {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory || !isAbsolute(directory)) continue;
+    const executable = join(directory, "tmux");
+    try {
+      accessSync(executable, constants.X_OK);
+      return executable;
+    } catch {
+      // Continue searching PATH entries that contain an executable tmux.
+    }
+  }
+  throw new Error("tmux executable not found in absolute PATH directories");
+}
+
 export function focusSurface(surface: string): void {
-  execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
+  if (!/^%\d+$/.test(surface)) throw new Error(`Invalid tmux pane id: ${surface}`);
+  // Resolve tmux to an absolute executable and never invoke a shell.
+  execFileSync(getTmuxExecutable(), ["select-pane", "-t", surface], { encoding: "utf8" });
 }
 
 export function getFocusedSurface(): string | null {
   try {
-    const panes = execFileSync("tmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
+    // Resolve tmux to an absolute executable; fixed arguments avoid interpolation.
+    const panes = execFileSync(getTmuxExecutable(), ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
       encoding: "utf8",
     });
     const activeLine = panes.split("\n").find((line) => line.endsWith(" 1"));
@@ -94,7 +113,7 @@ export async function waitForFocusedSurface(surface: string, timeout: number = P
   const start = Date.now();
   while (Date.now() - start < timeout) {
     if (getFocusedSurface() === surface) return;
-    await sleep(200);
+    await sleep(200); // NOSONAR: Keep check-then-delay order so focus polling stays responsive.
   }
 
   throw new Error(
@@ -238,7 +257,7 @@ export async function waitForScreen(
       const screen = await readScreenAsync(surface, lines);
       if (pattern.test(screen)) return screen;
     } catch {}
-    await sleep(2000);
+    await sleep(2000); // NOSONAR: Keep check-then-delay order between screen polls.
   }
 
   let finalScreen = "";
@@ -263,11 +282,10 @@ export async function waitForFile(
       const content = readFileSync(path, "utf8");
       if (!contentPattern || contentPattern.test(content)) return content;
     }
-    await sleep(2000);
+    await sleep(2000); // NOSONAR: Keep check-then-delay order between file polls.
   }
-  throw new Error(
-    `Timeout (${timeout}ms) waiting for file: ${path}` + (contentPattern ? ` matching ${contentPattern}` : ""),
-  );
+  const patternDescription = contentPattern ? " matching " : "";
+  throw new Error(`Timeout (${timeout}ms) waiting for file: ${path}${patternDescription}${contentPattern ?? ""}`);
 }
 
 /**
@@ -276,8 +294,8 @@ export async function waitForFile(
  */
 export async function waitForPiExit(surface: string, timeout: number = PI_TIMEOUT): Promise<number> {
   const screen = await waitForScreen(surface, /__TEST_DONE_(\d+)__/, timeout);
-  const match = screen.match(/__TEST_DONE_(\d+)__/);
-  return match ? parseInt(match[1], 10) : -1;
+  const match = /__TEST_DONE_(\d+)__/.exec(screen);
+  return match ? Number.parseInt(match[1], 10) : -1;
 }
 
 // ── Utilities ──
@@ -287,7 +305,7 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function uniqueId(): string {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  return randomUUID();
 }
 
 /**
