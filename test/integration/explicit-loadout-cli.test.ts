@@ -113,7 +113,7 @@ describe("explicit loadout Pi CLI smoke", () => {
       writeFileSync(
         markerPath,
         `import { writeFileSync } from "node:fs";\n` +
-          `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => { writeFileSync(${JSON.stringify(startupMarker)}, "started"); ctx.shutdown(); }); }\n`,
+          `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => { writeFileSync(${JSON.stringify(startupMarker)}, "started"); ctx.shutdown(); }); pi.on("input", () => ({ action: "handled" })); }\n`,
         "utf8",
       );
       const policyRun = runPi(
@@ -141,7 +141,7 @@ describe("explicit loadout Pi CLI smoke", () => {
       assert.equal(policyRun.status, 0, `Strict policy startup failed:\n${policyRun.stdout}\n${policyRun.stderr}`);
       assert.doesNotMatch(policyRun.stderr, /Explicit subagent loadout rejected/);
       assert.equal(readFileSync(startupMarker, "utf8"), "started");
-      assert.equal(readFileSync(readyPath, "utf8"), "validated");
+      assert.ok(["validated", "ready"].includes(readFileSync(readyPath, "utf8")));
 
       // Also load the package's real extension entrypoint under this runtime to
       // verify the package/API namespace combination without invoking a model.
@@ -149,7 +149,7 @@ describe("explicit loadout Pi CLI smoke", () => {
       writeFileSync(
         markerPath,
         `import { writeFileSync } from "node:fs";\n` +
-          `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => { writeFileSync(${JSON.stringify(extensionMarker)}, "started"); ctx.shutdown(); }); }\n`,
+          `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => { writeFileSync(${JSON.stringify(extensionMarker)}, "started"); ctx.shutdown(); }); pi.on("input", () => ({ action: "handled" })); }\n`,
         "utf8",
       );
       const extensionRun = runPi([

@@ -1,4 +1,7 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { resolveMcpServerIdentities, type McpServerIdentity } from "./mcp-identity.ts";
 import {
   authorizeToolCall,
   snapshotToolProviders,
@@ -8,6 +11,8 @@ import {
 
 interface ExplicitLoadoutPolicy {
   version: 1;
+  mcpServers?: string[];
+  mcpServerFingerprints?: McpServerIdentity[];
   toolProviders: ResolvedToolProvider[];
 }
 
@@ -39,14 +44,17 @@ export function createToolPolicyHandlers(
   onPinned?: (grants: readonly ResolvedToolProvider[]) => void,
   onReady?: () => void,
   onValidated?: () => void,
+  validateMcpConfiguration?: () => void,
 ) {
   const effectiveGrants = grants.map((grant) => ({ ...grant }));
+  const hasMcpGrants = effectiveGrants.some((grant) => Boolean(grant.mcpServer));
   let validated = false;
   let ready = false;
   let startupError: string | undefined;
   return {
     start(ctx: { shutdown(): void }): string | undefined {
       try {
+        validateMcpConfiguration?.();
         const providers = getProviders();
         let pinned = false;
         for (const grant of effectiveGrants) {
@@ -59,7 +67,10 @@ export function createToolPolicyHandlers(
           grant.contractFingerprint = matches[0].contractFingerprint;
           pinned = true;
         }
-        validateToolProviderGrants(effectiveGrants, providers);
+        validateToolProviderGrants(
+          hasMcpGrants ? effectiveGrants.filter((grant) => !grant.mcpServer) : effectiveGrants,
+          providers,
+        );
         if (pinned) onPinned?.(effectiveGrants);
         onValidated?.();
         validated = true;
@@ -72,7 +83,35 @@ export function createToolPolicyHandlers(
     },
     handleInput(ctx?: { shutdown(): void }) {
       if (!validated) return { action: "handled" as const };
-      if (ready) return { action: "continue" as const };
+      if (!hasMcpGrants && ready) return { action: "continue" as const };
+      if (hasMcpGrants) {
+        return (async () => {
+          try {
+            const deadline = Number(process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS);
+            while (true) {
+              const providers = getProviders();
+              const pending = effectiveGrants.filter(
+                (grant) => grant.mcpServer && !providers.some((provider) => provider.name === grant.name),
+              );
+              if (pending.length === 0) {
+                validateToolProviderGrants(effectiveGrants, providers);
+                break;
+              }
+              if (!Number.isSafeInteger(deadline) || deadline <= 0 || Date.now() >= deadline) {
+                throw new Error(`Granted MCP tool "${pending[0].name}" is unavailable.`);
+              }
+              await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+            }
+            if (!ready) onReady?.();
+            ready = true;
+            return { action: "continue" as const };
+          } catch (error) {
+            startupError = String(error);
+            ctx?.shutdown();
+            return { action: "handled" as const };
+          }
+        })();
+      }
       try {
         validateToolProviderGrants(effectiveGrants, getProviders());
         onReady?.();
@@ -83,6 +122,9 @@ export function createToolPolicyHandlers(
         ctx?.shutdown();
         return { action: "handled" as const };
       }
+    },
+    failureReason(): string | undefined {
+      return startupError;
     },
     authorize(event: { toolName: string; parentToolCallId?: string }) {
       if (!ready) {
@@ -147,6 +189,33 @@ export default function subagentToolPolicy(pi: any): void {
       assertStartupDeadline();
       writeReadinessState(readinessPath, "validated");
     },
+    () => {
+      const names = policy.mcpServers ?? [];
+      const expected = policy.mcpServerFingerprints ?? [];
+      if (names.length === 0) {
+        if (expected.length !== 0) throw new Error("Unexpected MCP configuration identities in an empty loadout.");
+        return;
+      }
+      if (typeof pi.getMcpServers !== "function") {
+        throw new Error("This Pi runtime does not expose configured MCP server identities.");
+      }
+      const current = resolveMcpServerIdentities(names, {
+        agentDir: process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+        cwd: process.cwd(),
+        registeredServers: pi.getMcpServers(),
+      });
+      for (const name of names) {
+        const expectedMatches = expected.filter((server) => server.name === name);
+        const currentMatches = current.filter((server) => server.name === name);
+        if (
+          expectedMatches.length !== 1 ||
+          currentMatches.length !== 1 ||
+          expectedMatches[0].fingerprint !== currentMatches[0].fingerprint
+        ) {
+          throw new Error(`MCP server "${name}" changed configuration identity; a fresh subagent spawn is required.`);
+        }
+      }
+    },
   );
   pi.on("session_start", (_event: unknown, ctx: any) => {
     const error = handlers.start({ shutdown: () => ctx.shutdown() });
@@ -171,6 +240,27 @@ export default function subagentToolPolicy(pi: any): void {
       }
     }
   });
-  pi.on("input", (_event: unknown, ctx: any) => handlers.handleInput({ shutdown: () => ctx.shutdown() }));
+  pi.on("input", async (_event: unknown, ctx: any) => {
+    const result = await handlers.handleInput({ shutdown: () => ctx.shutdown() });
+    if (result.action === "handled") {
+      const reason = handlers.failureReason() ?? "startup validation failed.";
+      console.error(`Explicit subagent loadout rejected before model use: ${reason}`);
+      const sessionFile = process.env.PI_SUBAGENT_SESSION;
+      if (sessionFile) {
+        try {
+          const failurePath = `${sessionFile}.exit`;
+          writeFileSync(
+            failurePath,
+            JSON.stringify({ type: "error", errorMessage: "Explicit subagent loadout rejected before model use." }),
+            { encoding: "utf8", mode: 0o600 },
+          );
+          chmodSync(failurePath, 0o600);
+        } catch {
+          // The child still shuts down; failure to report it must not make it runnable.
+        }
+      }
+    }
+    return result;
+  });
   pi.on("tool_call", handlers.authorize);
 }

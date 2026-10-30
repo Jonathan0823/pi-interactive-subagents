@@ -66,6 +66,7 @@ import {
   type SessionStats,
   type SubagentLoadout,
 } from "./session.ts";
+import { resolveMcpServerIdentities, type McpServerIdentity } from "./mcp-identity.ts";
 import {
   appendExplicitLoadoutArgs,
   createExplicitLoadoutSnapshot,
@@ -257,6 +258,12 @@ function getRuntimeToolProviders(pi: unknown): ResolvedToolProvider[] {
     throw new Error("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
   }
   return snapshotToolProviders(getAllTools.call(pi));
+}
+
+function getRegisteredMcpServerConfigs(pi: unknown): Array<{ name: string; config: unknown }> {
+  const getMcpServers = (pi as { getMcpServers?: () => Array<{ name: string; config: unknown }> } | null)
+    ?.getMcpServers;
+  return typeof getMcpServers === "function" ? getMcpServers.call(pi) : [];
 }
 
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
@@ -1289,6 +1296,7 @@ function applySandboxToParts(
     name: string;
     runtimeVersion?: string;
     registeredExtensions?: RegisteredSubagentExtension[];
+    currentMcpServers?: readonly McpServerIdentity[];
     requirePinnedContracts?: boolean;
   },
 ): void {
@@ -1321,6 +1329,7 @@ function applySandboxToParts(
     validateExplicitLoadoutSnapshot(loadout.explicitLoadout, {
       runtimeVersion: opts.runtimeVersion ?? getPiRuntimeVersion(),
       registeredExtensions: opts.registeredExtensions ?? getRegisteredSubagentExtensions(latestPi),
+      currentMcpServers: opts.currentMcpServers,
       requirePinnedContracts: opts.requirePinnedContracts,
     });
     appendExplicitLoadoutArgs(
@@ -1685,6 +1694,12 @@ async function launchSubagent(
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
   let explicitLoadout: SubagentLoadout["explicitLoadout"] = options?.explicitLoadout;
+  const selectedMcpServers = explicitLoadout?.mcpServers ?? agentDefs?.mcpServers ?? [];
+  const mcpServerIdentities = resolveMcpServerIdentities(selectedMcpServers, {
+    agentDir: effectiveAgentDir,
+    cwd: targetCwdForSession,
+    registeredServers: getRegisteredMcpServerConfigs(latestPi),
+  });
   if (agentDefs?.explicitLoadout && !explicitLoadout) {
     const runtimeVersion = getPiRuntimeVersion();
     const resolved = resolveExplicitLoadout(
@@ -1698,6 +1713,7 @@ async function launchSubagent(
       } satisfies ExplicitLoadoutProfile,
       getRegisteredSubagentExtensions(latestPi),
       getRuntimeToolProviders(latestPi),
+      mcpServerIdentities,
     );
     if (
       resolved.extensions.some((extension) => !extension.path.startsWith("builtin:")) &&
@@ -1724,6 +1740,7 @@ async function launchSubagent(
     explicitLoadout = createExplicitLoadoutSnapshot(resolved, runtimeVersion, managedProviders, [
       fileURLToPath(import.meta.url),
       join(SUBAGENTS_DIR, "loadout.ts"),
+      join(SUBAGENTS_DIR, "mcp-identity.ts"),
       join(SUBAGENTS_DIR, "startup.ts"),
       join(SUBAGENTS_DIR, "tool-policy.ts"),
       join(SUBAGENTS_DIR, "subagent-done.ts"),
@@ -1906,6 +1923,7 @@ async function launchSubagent(
     artifactDir,
     name: params.name,
     runtimeVersion: explicitLoadout?.runtimeVersion,
+    currentMcpServers: explicitLoadout ? mcpServerIdentities : undefined,
   });
 
   // Explicit children must report policy readiness before the startup deadline.
@@ -2745,13 +2763,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: err }], details: { error: err } };
       }
 
+      let currentMcpServers: McpServerIdentity[] = [];
       if (loadout.explicitLoadout) {
         try {
+          currentMcpServers = resolveMcpServerIdentities(loadout.explicitLoadout.mcpServers, {
+            agentDir: loadout.agentDir ?? getAgentConfigDir(),
+            cwd: loadout.cwd ?? ctx.cwd,
+            registeredServers: getRegisteredMcpServerConfigs(latestPi),
+          });
           validateExplicitLoadoutSnapshot(loadout.explicitLoadout, {
             runtimeVersion: getPiRuntimeVersion(),
             registeredExtensions: getRegisteredSubagentExtensions(latestPi),
             requirePinnedContracts: true,
             currentTools: getRuntimeToolProviders(latestPi),
+            currentMcpServers,
           });
         } catch (error) {
           const message = `Cannot safely resume "${requestedName}": ${String(error)} Re-run it as a fresh subagent.`;
@@ -2785,7 +2810,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       mkdirSync(dirname(activityFile), { recursive: true });
 
       // Replay the model, identity, and default-deny tool/extension sandbox.
-      applySandboxToParts(parts, loadout, { artifactDir, name, requirePinnedContracts: true });
+      applySandboxToParts(parts, loadout, {
+        artifactDir,
+        name,
+        requirePinnedContracts: true,
+        currentMcpServers,
+      });
 
       let resumeMsgFile: string | undefined;
       if (params.message) {
