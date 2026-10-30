@@ -347,6 +347,16 @@ function validateSelectedTool(
   }
 }
 
+function resolveUnavailableToolProvider(name: string, hasChildExtensions: boolean): ResolvedToolProvider {
+  // A restricted parent may not register a built-in that the child's profile requests.
+  // Pin its contract in the child, but require the exact built-in provider at startup.
+  if (BUILTIN_TOOLS.has(name)) return { name, provider: `builtin:${name}`, runnerManaged: true };
+  if (hasChildExtensions && !name.startsWith("mcp__") && !GENERIC_MCP_TOOLS.has(name)) {
+    return { name, provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true };
+  }
+  throw new Error(`Tool grant "${name}" is not available in the parent runtime.`);
+}
+
 function resolveRequestedToolProviders(
   requestedTools: readonly string[],
   availableTools: readonly ResolvedToolProvider[],
@@ -365,11 +375,8 @@ function resolveRequestedToolProviders(
 
     const matches = availableTools.filter((tool) => tool.name === name);
     if (matches.length === 0) {
-      if (subagentOnlyExtensions.length > 0 && !name.startsWith("mcp__") && !GENERIC_MCP_TOOLS.has(name)) {
-        toolProviders.push({ name, provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true });
-        continue;
-      }
-      throw new Error(`Tool grant "${name}" is not available in the parent runtime.`);
+      toolProviders.push(resolveUnavailableToolProvider(name, subagentOnlyExtensions.length > 0));
+      continue;
     }
     if (matches.length !== 1) {
       throw new Error(`Tool grant "${name}" has ambiguous providers.`);

@@ -1712,6 +1712,67 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("pins child built-ins missing from a restricted parent's tool registry", () => {
+    withTempDir((dir) => {
+      const extensionPath = join(dir, "child-tools.ts");
+      writeFileSync(extensionPath, "export default function childTools() {}\n");
+      const childExtension = { path: extensionPath, fingerprint: fingerprintExtension(extensionPath) };
+      for (const subagentOnlyExtensions of [[], [childExtension]]) {
+        const names = ["grep", "find", "ls"];
+        const resolved = resolveExplicitLoadout({ tools: names, subagentOnlyExtensions }, [], []);
+        assert.deepEqual(
+          resolved.toolProviders,
+          names.map((name) => ({ name, provider: `builtin:${name}`, runnerManaged: true })),
+        );
+        const providers = snapshotToolProviders(
+          names.map((name) => ({
+            name,
+            description: `${name} tool`,
+            parameters: {},
+            sourceInfo: { path: `builtin:${name}` },
+          })),
+        );
+        let pinned: unknown;
+        const handlers = createToolPolicyHandlers(
+          resolved.toolProviders,
+          () => providers,
+          (grants) => {
+            pinned = grants;
+          },
+        );
+        assert.equal(
+          handlers.start({
+            shutdown() {
+              assert.fail("valid built-ins must not stop startup");
+            },
+          }),
+          undefined,
+        );
+        assert.deepEqual(
+          pinned,
+          providers.map((provider) => ({ ...provider, runnerManaged: true })),
+        );
+        assert.deepEqual(handlers.handleInput(), { action: "continue" });
+        for (const name of names) assert.equal(handlers.authorize({ toolName: name }), undefined);
+
+        for (const invalidProviders of [[], providers.map((provider) => ({ ...provider, provider: extensionPath }))]) {
+          let stopped = false;
+          const invalid = createToolPolicyHandlers(resolved.toolProviders, () => invalidProviders);
+          assert.match(
+            invalid.start({
+              shutdown() {
+                stopped = true;
+              },
+            }) ?? "",
+            /unexpected provider or contract/,
+          );
+          assert.equal(stopped, true, "absent or substituted built-ins must fail closed");
+        }
+      }
+      assert.throws(() => resolveExplicitLoadout({ tools: ["unknown_tool"] }, [], []), /not available/);
+    });
+  });
+
   it("fingerprints safe MCP configuration without persisting secret values", () => {
     const first = fingerprintMcpServerConfig("selected", {
       command: "node",
