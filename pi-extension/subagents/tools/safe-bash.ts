@@ -10,8 +10,6 @@ import { createBashTool } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 const DANGEROUS_PATTERNS = [
-  /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?(\/|~\/?\s|~\/?\b)/,
-  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/|~\/?\s|~\/?\b)/,
   /\bsudo\b/,
   /\bmkfs\b/,
   /\bdd\s+if=/,
@@ -29,7 +27,11 @@ const DANGEROUS_PATTERNS = [
 ];
 
 function isDangerous(command: string): string | null {
-  const normalized = command.replace(/\\\n/g, " ");
+  const normalized = command.replaceAll("\\\n", " ");
+  const rmCommand = /\brm\s+(?:-[a-zA-Z]+\s+){0,2}(?:\/|~(?:\/|\s|$))/.test(normalized);
+  if (rmCommand) {
+    return "Command blocked by safe_bash: matches dangerous pattern rm recursive force root";
+  }
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(normalized)) {
       return `Command blocked by safe_bash: matches dangerous pattern ${pattern}`;
@@ -38,7 +40,7 @@ function isDangerous(command: string): string | null {
   return null;
 }
 
-export default function (pi: ExtensionAPI) {
+export default function safeBash(pi: ExtensionAPI) {
   const bashTool = createBashTool(process.cwd());
 
   pi.registerTool({
@@ -49,7 +51,7 @@ export default function (pi: ExtensionAPI) {
       command: Type.String({ description: "Bash command to execute" }),
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional)" })),
     }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    execute(toolCallId, params, signal, onUpdate, _ctx) {
       const danger = isDangerous(params.command);
       if (danger) {
         throw new Error(danger);
