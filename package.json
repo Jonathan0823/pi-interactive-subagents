@@ -17,6 +17,7 @@
     "lint": "biome lint agents pi-extension test",
     "build": "tsc --noEmit --noCheck",
     "test": "node --test test/test.ts",
+    "test:coverage": "c8 --all --include='pi-extension/**/*.ts' --reporter=text --reporter=lcov node --test test/test.ts",
     "test:loadout:cli": "node --test test/integration/explicit-loadout-cli.test.ts",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts"
   },
@@ -36,6 +37,7 @@
     "@mariozechner/pi-tui": "^0.65.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^22.20.5",
+    "c8": "^12.0.0",
     "typescript": "^7.0.2"
   }
 }

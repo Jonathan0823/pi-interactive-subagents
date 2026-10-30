@@ -4,3 +4,4 @@ config.json
 .memory/
 .pi/
 .scannerwork/
+coverage/
