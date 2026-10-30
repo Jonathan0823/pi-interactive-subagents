@@ -1853,7 +1853,7 @@ describe("subagent discovery", () => {
     withTempDir((dir) => {
       const readyPath = join(dir, "ready");
       const exitPath = join(dir, "session.exit");
-      const childError = { type: "error", errorMessage: "Granted tool \\\"ffgrep\\\" is unavailable." };
+      const childError = { type: "error", errorMessage: 'Granted tool \\"ffgrep\\" is unavailable.' };
       const command = buildStartupDeadlineCommand({
         command: `printf '%s' ${shellEscape(JSON.stringify(childError))} > ${shellEscape(exitPath)}; exec sleep 5`,
         readyFile: readyPath,
@@ -2150,7 +2150,10 @@ describe("subagent discovery", () => {
       assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
 
       providers = [{ name: grant.name, provider: extensionPath, contractFingerprint: testContract }];
-      assert.equal(await policy.beforeAgentStart({ shutdown: () => assert.fail("provider should validate") }), undefined);
+      assert.equal(
+        await policy.beforeAgentStart({ shutdown: () => assert.fail("provider should validate") }),
+        undefined,
+      );
       assert.equal(pinned[0]?.provider, extensionPath);
       assert.equal(pinned[0]?.contractFingerprint, testContract);
       assert.equal(validatedSignals, 1);
@@ -2166,7 +2169,9 @@ describe("subagent discovery", () => {
     const extensionPath = "/child/extensions/context-mode.js";
     const grant = { name: "ctx_execute", provider: extensionPath, contractFingerprint: testContract };
     let providers: any[] = [];
-    const policy = createToolPolicyHandlers([grant], () => providers, undefined, undefined, undefined, undefined, [extensionPath]);
+    const policy = createToolPolicyHandlers([grant], () => providers, undefined, undefined, undefined, undefined, [
+      extensionPath,
+    ]);
     const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
     process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);
     try {
@@ -2174,7 +2179,10 @@ describe("subagent discovery", () => {
       assert.deepEqual(policy.handleInput(), { action: "continue" });
 
       providers = [{ ...grant }];
-      assert.equal(await policy.beforeAgentStart({ shutdown: () => assert.fail("pinned provider should validate") }), undefined);
+      assert.equal(
+        await policy.beforeAgentStart({ shutdown: () => assert.fail("pinned provider should validate") }),
+        undefined,
+      );
       assert.equal(policy.authorize({ toolName: grant.name }), undefined);
     } finally {
       if (previousDeadline === undefined) delete process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;

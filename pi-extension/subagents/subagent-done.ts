@@ -18,10 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
-export function shouldBlockSubagentInputForLoadout(
-  state: string | undefined,
-  initialInputConsumed: boolean,
-): boolean {
+export function shouldBlockSubagentInputForLoadout(state: string | undefined, initialInputConsumed: boolean): boolean {
   if (state === "validated" || state === "ready") return false;
   return state !== "pending" || initialInputConsumed;
 }

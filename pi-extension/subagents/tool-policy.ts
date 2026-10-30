@@ -145,7 +145,8 @@ export function createToolPolicyHandlers(
           const pendingChildOnly: ResolvedToolProvider[] = [];
           for (const grant of deferredChildOnlyGrants) {
             const matches = providers.filter((provider) => provider.name === grant.name);
-            if (matches.length > 1) throw new Error(`Child-only extension tool "${grant.name}" has ambiguous providers.`);
+            if (matches.length > 1)
+              throw new Error(`Child-only extension tool "${grant.name}" has ambiguous providers.`);
             if (matches.length === 0) {
               pendingChildOnly.push(grant);
               continue;
