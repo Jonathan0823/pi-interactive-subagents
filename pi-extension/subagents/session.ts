@@ -203,7 +203,7 @@ export function registerName(artifactDir: string, name: string, entry: NameRegis
     const registry = readNameRegistry(artifactDir);
     registry[name] = entry;
     const p = nameRegistryPath(artifactDir);
-    const tmp = `${p}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
+    const tmp = `${p}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
     writeFileSync(tmp, JSON.stringify(registry, null, 2), "utf8");
     renameSync(tmp, p);
   } catch {
@@ -231,7 +231,7 @@ function readEntries(sessionFile: string): SessionEntry[] {
  */
 export function getLeafId(sessionFile: string): string | null {
   const entries = readEntries(sessionFile);
-  return entries.length > 0 ? entries[entries.length - 1].id : null;
+  return entries.at(-1)?.id ?? null;
 }
 
 /**
@@ -336,8 +336,24 @@ function topLevelSignature(root: string): string {
       parts.push(`f:${e.name}`);
     }
   }
-  parts.sort();
+  parts.sort((a, b) => a.localeCompare(b));
   return parts.join("|");
+}
+
+function indexSessionFile(full: string, idx: SessionIndex): void {
+  let mtime: number;
+  try {
+    mtime = statSync(full).mtimeMs;
+  } catch {
+    return;
+  }
+  const known = idx.files.get(full);
+  if (known !== undefined && known === mtime) return;
+  const id = readHeaderId(full);
+  idx.files.set(full, mtime);
+  if (!id) return;
+  const prev = idx.idToFile.get(id);
+  if (!prev || mtime >= prev.mtime) idx.idToFile.set(id, { path: full, mtime });
 }
 
 /** Recursively index new/changed .jsonl files under dir into idx. */
@@ -353,21 +369,7 @@ function indexDir(dir: string, idx: SessionIndex): void {
     if (entry.isDirectory()) {
       indexDir(full, idx);
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      let mtime = 0;
-      try {
-        mtime = statSync(full).mtimeMs;
-      } catch {
-        continue;
-      }
-      const known = idx.files.get(full);
-      if (known !== undefined && known === mtime) continue; // unchanged
-      const id = readHeaderId(full); // only read headers for new/changed files
-      idx.files.set(full, mtime);
-      if (!id) continue;
-      const prev = idx.idToFile.get(id);
-      if (!prev || mtime >= prev.mtime) {
-        idx.idToFile.set(id, { path: full, mtime });
-      }
+      indexSessionFile(full, idx);
     }
   }
 }
@@ -562,15 +564,8 @@ export interface SessionStats {
  * context size is taken from the last assistant turn's `totalTokens` (the live
  * context window occupancy). Returns null if the file can't be read.
  */
-export function summarizeSessionStats(sessionFile: string): SessionStats | null {
-  let entries: SessionEntry[];
-  try {
-    entries = readEntries(sessionFile);
-  } catch {
-    return null;
-  }
-
-  const stats: SessionStats = {
+function emptySessionStats(): SessionStats {
+  return {
     model: null,
     toolCount: 0,
     inputTokens: 0,
@@ -580,7 +575,40 @@ export function summarizeSessionStats(sessionFile: string): SessionStats | null 
     contextTokens: 0,
     cost: 0,
   };
+}
 
+function numericUsage(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function accumulateAssistantStats(stats: SessionStats, msg: MessageEntry["message"]): void {
+  const model = (msg as { model?: unknown }).model;
+  if (typeof model === "string" && model) stats.model = model;
+  for (const block of msg.content) {
+    if (block.type === "toolCall") stats.toolCount++;
+  }
+
+  const usage = (msg as { usage?: Record<string, unknown> }).usage;
+  if (!usage || typeof usage !== "object") return;
+  stats.inputTokens += numericUsage(usage.input);
+  stats.outputTokens += numericUsage(usage.output);
+  stats.cacheReadTokens += numericUsage(usage.cacheRead);
+  stats.cacheWriteTokens += numericUsage(usage.cacheWrite);
+  const total = numericUsage(usage.totalTokens);
+  if (total > 0) stats.contextTokens = total;
+  const cost = usage.cost;
+  if (cost && typeof cost === "object") stats.cost += numericUsage((cost as Record<string, unknown>).total);
+}
+
+export function summarizeSessionStats(sessionFile: string): SessionStats | null {
+  let entries: SessionEntry[];
+  try {
+    entries = readEntries(sessionFile);
+  } catch {
+    return null;
+  }
+
+  const stats = emptySessionStats();
   for (const entry of entries) {
     if (entry.type === "model_change") {
       const modelId = (entry as { modelId?: unknown }).modelId;
@@ -589,27 +617,7 @@ export function summarizeSessionStats(sessionFile: string): SessionStats | null 
     }
     if (entry.type !== "message") continue;
     const msg = (entry as MessageEntry).message;
-    if (msg.role !== "assistant") continue;
-
-    const model = (msg as { model?: unknown }).model;
-    if (typeof model === "string" && model) stats.model = model;
-
-    for (const block of msg.content) {
-      if (block.type === "toolCall") stats.toolCount++;
-    }
-
-    const usage = (msg as { usage?: Record<string, unknown> }).usage;
-    if (usage && typeof usage === "object") {
-      const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-      stats.inputTokens += num(usage.input);
-      stats.outputTokens += num(usage.output);
-      stats.cacheReadTokens += num(usage.cacheRead);
-      stats.cacheWriteTokens += num(usage.cacheWrite);
-      const total = num(usage.totalTokens);
-      if (total > 0) stats.contextTokens = total;
-      const cost = usage.cost;
-      if (cost && typeof cost === "object") stats.cost += num((cost as Record<string, unknown>).total);
-    }
+    if (msg.role === "assistant") accumulateAssistantStats(stats, msg);
   }
 
   return stats;
