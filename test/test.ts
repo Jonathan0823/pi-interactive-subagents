@@ -34,13 +34,16 @@ import {
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
 import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
 import {
+  appendExplicitLoadoutArgs,
   authorizeToolCall,
+  createExplicitLoadoutSnapshot,
   fingerprintExtension,
   resolveExplicitLoadout,
   snapshotToolProviders,
   validateExplicitLoadoutSnapshot,
   validateToolProviderGrants,
 } from "../pi-extension/subagents/loadout.ts";
+import { fingerprintMcpServerConfig, resolveMcpServerIdentities } from "../pi-extension/subagents/mcp-identity.ts";
 import { createToolPolicyHandlers } from "../pi-extension/subagents/tool-policy.ts";
 import {
   advanceStatusState,
@@ -1425,6 +1428,7 @@ describe("subagent discovery", () => {
     assert.deepEqual(resolved, {
       extensions: [{ name: "builtin:codemode", path: "builtin:codemode", identity: "builtin:codemode" }],
       mcpServers: [],
+      mcpServerFingerprints: [],
       toolProviders: [
         { name: "read", provider: "builtin:read", contractFingerprint: testContract },
         { name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract },
@@ -1450,16 +1454,275 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("rejects MCP selections until isolated MCP loading is supported", () => {
+  it("grants an exact MCP tool only from its selected server", () => {
+    const fingerprint = "a".repeat(64);
+    const available = [
+      {
+        name: "mcp__selected__read",
+        provider: "builtin:mcp",
+        mcpServer: "selected",
+        contractFingerprint: testContract,
+      },
+      {
+        name: "mcp__other__read",
+        provider: "builtin:mcp",
+        mcpServer: "other",
+        contractFingerprint: testContract,
+      },
+    ];
+    const resolved = resolveExplicitLoadout(
+      { extensions: [], mcpServers: ["selected"], tools: ["mcp__selected__read"] },
+      [],
+      available,
+      [{ name: "selected", fingerprint }],
+    );
+
+    assert.deepEqual(resolved, {
+      extensions: [],
+      mcpServers: ["selected"],
+      mcpServerFingerprints: [{ name: "selected", fingerprint }],
+      toolProviders: [available[0]],
+    });
     assert.throws(
       () =>
         resolveExplicitLoadout(
-          { extensions: ["builtin:codemode"], mcpServers: ["context-mode"], tools: ["codemode"] },
-          [{ name: "builtin:codemode", path: "builtin:codemode" }],
-          [{ name: "codemode", provider: "builtin:codemode", contractFingerprint: testContract }],
+          { extensions: [], mcpServers: ["selected"], tools: ["mcp__other__read"] },
+          [],
+          available,
+          [{ name: "selected", fingerprint }],
         ),
-      /Selective MCP server loadouts are not supported/,
+      /not provided by an explicitly selected resource/,
     );
+    assert.throws(
+      () =>
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: ["selected"], tools: ["mcp__selected__read"] },
+          [],
+          available,
+        ),
+      /no safe configuration identity/,
+    );
+  });
+
+  it("rejects unscoped MCP proxy and resource tools", () => {
+    for (const name of ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "tool_search"]) {
+      assert.throws(
+        () =>
+          resolveExplicitLoadout(
+            { extensions: [], mcpServers: ["selected"], tools: [name] },
+            [],
+            [
+              {
+                name: "mcp__selected__read",
+                provider: "builtin:mcp",
+                mcpServer: "selected",
+                contractFingerprint: testContract,
+              },
+              { name, provider: "builtin:mcp", contractFingerprint: testContract },
+            ],
+            [{ name: "selected", fingerprint: "a".repeat(64) }],
+          ),
+        /Generic MCP proxy\/search tool/,
+      );
+    }
+  });
+
+  it("validates selected MCP configuration and provider identity on resume", () => {
+    const fingerprint = "b".repeat(64);
+    const grant = {
+      name: "mcp__selected__read",
+      provider: "builtin:mcp",
+      mcpServer: "selected",
+      contractFingerprint: testContract,
+    };
+    const resolved = resolveExplicitLoadout(
+      { extensions: [], mcpServers: ["selected"], tools: [grant.name] },
+      [],
+      [grant],
+      [{ name: "selected", fingerprint }],
+    );
+    const snapshot = createExplicitLoadoutSnapshot(resolved, "1.4.0", [], []);
+    const context = {
+      runtimeVersion: "1.4.0",
+      requirePinnedContracts: true,
+      currentTools: [grant],
+      currentMcpServers: [{ name: "selected", fingerprint }],
+    };
+    assert.doesNotThrow(() => validateExplicitLoadoutSnapshot(snapshot, context));
+    assert.throws(
+      () =>
+        validateExplicitLoadoutSnapshot(snapshot, {
+          ...context,
+          currentMcpServers: [{ name: "selected", fingerprint: "c".repeat(64) }],
+        }),
+      /changed configuration identity/,
+    );
+    assert.throws(
+      () =>
+        validateExplicitLoadoutSnapshot(snapshot, {
+          ...context,
+          currentTools: [{ ...grant, mcpServer: "other" }],
+        }),
+      /changed provider or contract/,
+    );
+  });
+
+  it("snapshots exact MCP server names from Pi tool namespaces", () => {
+    const providers = snapshotToolProviders([
+      {
+        name: "mcp__selected_server__read",
+        description: "Read a value.",
+        parameters: { type: "object" },
+        sourceInfo: { path: "builtin:mcp" },
+        namespace: { name: "mcp__selected_server", aliases: ["selected-server"] },
+      },
+    ]);
+    assert.equal(providers[0].mcpServer, "selected-server");
+    assert.equal(providers[0].provider, "builtin:mcp");
+    assert.match(providers[0].contractFingerprint ?? "", /^[a-f0-9]{64}$/);
+    const ambiguous = snapshotToolProviders([
+      {
+        name: "mcp__selected_server__read",
+        description: "Read a value.",
+        parameters: { type: "object" },
+        sourceInfo: { path: "builtin:mcp" },
+        namespace: { aliases: ["selected-server", "selected_server"] },
+      },
+    ]);
+    assert.equal(ambiguous[0].mcpServer, undefined);
+    assert.throws(
+      () =>
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: [], tools: ["mcp__selected_server__read"] },
+          [],
+          ambiguous,
+        ),
+      /not provided by an explicitly selected resource/,
+    );
+
+    const foreignProvider = snapshotToolProviders([
+      {
+        name: "mcp__selected_server__read",
+        description: "Read a value.",
+        parameters: { type: "object" },
+        sourceInfo: { path: "/extensions/other.ts" },
+        namespace: { aliases: ["selected-server"] },
+      },
+    ]);
+    assert.equal(foreignProvider[0].mcpServer, undefined);
+    assert.throws(
+      () =>
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: [], tools: ["mcp__selected_server__read"] },
+          [],
+          foreignProvider,
+        ),
+      /unexpected provider identity/,
+    );
+  });
+
+  it("fingerprints safe MCP configuration without persisting secret values", () => {
+    const first = fingerprintMcpServerConfig("selected", {
+      command: "node",
+      args: ["server.mjs", "--mode", "safe"],
+      env: { API_TOKEN: "first-secret" },
+      exposure: "direct",
+    });
+    const rotatedCredential = fingerprintMcpServerConfig("selected", {
+      command: "node",
+      args: ["server.mjs", "--mode", "safe"],
+      env: { API_TOKEN: "second-secret" },
+      exposure: "direct",
+    });
+    const changedConfig = fingerprintMcpServerConfig("selected", {
+      command: "node",
+      args: ["server.mjs", "--mode", "restricted"],
+      env: { API_TOKEN: "second-secret" },
+      exposure: "direct",
+    });
+    const changedWorkingDirectory = fingerprintMcpServerConfig(
+      "selected",
+      {
+        command: "node",
+        args: ["server.mjs", "--mode", "safe"],
+        env: { API_TOKEN: "first-secret" },
+        exposure: "direct",
+      },
+      "/tmp/another-project",
+    );
+    assert.equal(first, rotatedCredential, "secret values are excluded from the safe configuration identity");
+    assert.notEqual(first, changedConfig, "non-secret server arguments are pinned");
+    assert.notEqual(first, changedWorkingDirectory, "the effective stdio working directory is pinned");
+    const filesystemPath = "/Users/someone/Documents/work/client-projects";
+    const filesystemIdentity = fingerprintMcpServerConfig("filesystem", {
+      command: "node",
+      args: ["server.mjs", filesystemPath],
+    });
+    const otherFilesystemIdentity = fingerprintMcpServerConfig("filesystem", {
+      command: "node",
+      args: ["server.mjs", "/Users/someone/Documents/work/other-project"],
+    });
+    assert.notEqual(filesystemIdentity, otherFilesystemIdentity, "filesystem paths are safely pinned");
+    assert.match(first, /^[a-f0-9]{64}$/);
+    assert.doesNotMatch(first, /first-secret|second-secret/);
+    assert.throws(
+      () => fingerprintMcpServerConfig("selected", { command: "node", args: ["--api-key", "secret"] }),
+      /secret-like arguments/,
+    );
+    assert.throws(
+      () => fingerprintMcpServerConfig("selected", { command: "node", args: ["x".repeat(48)] }),
+      /secret-like arguments/,
+    );
+    assert.throws(
+      () => fingerprintMcpServerConfig("selected", { command: "node", futureRuntimeOption: true }),
+      /fields that cannot be safely fingerprinted/,
+    );
+  });
+
+  it("rejects ambiguous MCP config sources instead of guessing the effective server", () => {
+    withTempDir((dir) => {
+      const agentDir = join(dir, "agent");
+      const cwd = join(dir, "project");
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: { selected: { command: "node" } } }));
+      writeFileSync(join(cwd, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { selected: { command: "node" } } }));
+      assert.throws(
+        () => resolveMcpServerIdentities(["selected"], { agentDir, cwd }),
+        /ambiguous configuration sources/,
+      );
+    });
+  });
+
+  it("appends the built-in MCP runtime only for explicit MCP server selections", () => {
+    const mcpParts: string[] = [];
+    appendExplicitLoadoutArgs(
+      mcpParts,
+      {
+        version: 1,
+        runtimeVersion: "1.4.0",
+        extensions: [],
+        mcpServers: ["selected"],
+        toolProviders: [],
+        runnerFiles: [],
+      },
+      "mcp__selected__read",
+      "/policy.ts",
+      shellEscape,
+    );
+    assert.ok(mcpParts.includes("-e"));
+    assert.ok(mcpParts.includes("'builtin:mcp'"));
+    assert.equal(mcpParts.includes("--no-mcp"), false);
+
+    const noMcpParts: string[] = [];
+    appendExplicitLoadoutArgs(
+      noMcpParts,
+      { version: 1, runtimeVersion: "1.4.0", extensions: [], mcpServers: [], toolProviders: [], runnerFiles: [] },
+      "read",
+      "/policy.ts",
+      shellEscape,
+    );
+    assert.ok(noMcpParts.includes("--no-mcp"));
   });
 
   it("registers exact subagent extension names with a stable identity", () => {
@@ -1776,6 +2039,44 @@ describe("subagent discovery", () => {
     );
     assert.equal(shutdownCount, 1, "provider drift must shut down the child before the model request");
     assert.equal(readinessSignals, 1, "provider drift must not signal readiness");
+  });
+
+  it("defers MCP grant readiness until direct server tools are available", async () => {
+    const grant = {
+      name: "mcp__selected__read",
+      provider: "builtin:mcp",
+      mcpServer: "selected",
+      contractFingerprint: testContract,
+    };
+    let providers: (typeof grant)[] = [];
+    let readinessSignals = 0;
+    const policy = createToolPolicyHandlers(
+      [grant],
+      () => providers,
+      undefined,
+      () => readinessSignals++,
+    );
+
+    const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+    process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);
+    try {
+      policy.start({ shutdown: () => assert.fail("MCP tool startup may still be connecting") });
+      const pendingInput = policy.handleInput();
+      assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
+
+      providers = [grant];
+      assert.deepEqual(await pendingInput, { action: "continue" });
+      assert.equal(readinessSignals, 1);
+      assert.equal(policy.authorize({ toolName: grant.name })?.block, undefined);
+
+      providers = [];
+      process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 1);
+      assert.deepEqual(await policy.handleInput(), { action: "handled" });
+      assert.equal(policy.authorize({ toolName: grant.name })?.block, true);
+    } finally {
+      if (previousDeadline === undefined) delete process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
+      else process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = previousDeadline;
+    }
   });
 
   it("pins runner-managed tool contracts on the first start and checks them thereafter", () => {

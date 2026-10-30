@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import type { McpServerIdentity } from "./mcp-identity.ts";
 
 export interface ExplicitLoadoutProfile {
   /** Presence of either resource field opts into strict mode. */
@@ -20,6 +21,8 @@ export interface RegisteredSubagentExtension {
 export interface ResolvedToolProvider {
   name: string;
   provider: string;
+  /** Exact configured MCP server when provider is the generic built-in MCP extension. */
+  mcpServer?: string;
   contractFingerprint?: string;
   runnerManaged?: boolean;
 }
@@ -27,6 +30,7 @@ export interface ResolvedToolProvider {
 export interface ResolvedExplicitLoadout {
   extensions: RegisteredSubagentExtension[];
   mcpServers: string[];
+  mcpServerFingerprints: McpServerIdentity[];
   toolProviders: ResolvedToolProvider[];
 }
 
@@ -35,6 +39,8 @@ export interface ExplicitSubagentLoadout {
   runtimeVersion: string;
   extensions: RegisteredSubagentExtension[];
   mcpServers: string[];
+  /** Allowlisted non-secret configuration fingerprints; never contains credentials. */
+  mcpServerFingerprints?: McpServerIdentity[];
   toolProviders: ResolvedToolProvider[];
   runnerFiles: Array<{ path: string; fingerprint: string }>;
 }
@@ -66,13 +72,27 @@ export function fingerprintToolContract(tool: { name: string; description: strin
 /** Snapshot runtime tools consistently in the parent and child policy. */
 export function snapshotToolProviders(tools: readonly any[]): ResolvedToolProvider[] {
   return tools.map((tool) => {
-    const provider = tool.sourceInfo?.path;
-    if (typeof provider !== "string" || !provider) {
+    const source = tool.sourceInfo?.path;
+    if (typeof source !== "string" || !source) {
       throw new Error(`Pi did not report a provider identity for tool "${tool.name}".`);
+    }
+    const provider = source.startsWith("builtin:") ? source : resolve(source);
+    let mcpServer: string | undefined;
+    if (typeof tool.name === "string" && tool.name.startsWith("mcp__")) {
+      const aliases = tool.namespace?.aliases;
+      const matches = Array.isArray(aliases)
+        ? aliases.filter(
+            (alias: unknown): alias is string =>
+              typeof alias === "string" && tool.name.startsWith(`mcp__${alias.replace(/[^a-zA-Z0-9_]/g, "_")}__`),
+          )
+        : [];
+      // Leave unidentified MCP tools unbound; explicit grant resolution rejects them.
+      if (provider === "builtin:mcp" && matches.length === 1) mcpServer = matches[0];
     }
     return {
       name: tool.name,
-      provider: provider.startsWith("builtin:") ? provider : resolve(provider),
+      provider,
+      ...(mcpServer ? { mcpServer } : {}),
       contractFingerprint: fingerprintToolContract({
         name: tool.name,
         description: typeof tool.description === "string" ? tool.description : "",
@@ -102,6 +122,7 @@ export function createExplicitLoadoutSnapshot(
     runtimeVersion,
     extensions: resolved.extensions,
     mcpServers: resolved.mcpServers,
+    ...(resolved.mcpServerFingerprints.length > 0 ? { mcpServerFingerprints: resolved.mcpServerFingerprints } : {}),
     toolProviders: [...providers.values()],
     runnerFiles: runnerPaths.map((path) => ({ path, fingerprint: fingerprintExtension(path) })),
   };
@@ -114,7 +135,10 @@ export function appendExplicitLoadoutArgs(
   policyExtensionPath: string,
   escape: (value: string) => string,
 ): void {
-  parts.push("--no-extensions", "--no-mcp", "--tools", escape(toolAllowlist ?? "ask_question"));
+  parts.push("--no-extensions");
+  if (loadout.mcpServers.length === 0) parts.push("--no-mcp");
+  else parts.push("-e", escape("builtin:mcp"));
+  parts.push("--tools", escape(toolAllowlist ?? "ask_question"));
   const extensionPaths = new Set(loadout.extensions.map((extension) => extension.path));
   for (const extension of loadout.extensions) parts.push("-e", escape(extension.path));
   const spawningToolNames = new Set(["subagent", "subagent_message", "subagents_list"]);
@@ -127,25 +151,43 @@ export function appendExplicitLoadoutArgs(
   parts.push("-e", escape(policyExtensionPath));
 }
 
-const MCP_RUNTIME_UNAVAILABLE =
-  "Selective MCP server loadouts are not supported by this subagent runner yet; no MCP servers were started.";
+const GENERIC_MCP_TOOLS = new Set([
+  "list_mcp_resources",
+  "list_mcp_resource_templates",
+  "read_mcp_resource",
+  "tool_search",
+]);
 
 /** Resolve an explicitly opted-in profile without allowing it to inherit tools or resources. */
 export function resolveExplicitLoadout(
   profile: ExplicitLoadoutProfile,
   registeredExtensions: readonly RegisteredSubagentExtension[],
   availableTools: readonly ResolvedToolProvider[],
+  configuredMcpServers: readonly McpServerIdentity[] = [],
 ): ResolvedExplicitLoadout {
-  if ((profile.mcpServers ?? []).length > 0) {
-    throw new Error(MCP_RUNTIME_UNAVAILABLE);
+  const mcpServers = profile.mcpServers ?? [];
+  const selectedMcpServers = new Set<string>();
+  for (const name of mcpServers) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error(`Invalid MCP server reference "${name}".`);
+    if (selectedMcpServers.has(name)) throw new Error(`Duplicate MCP server reference "${name}".`);
+    selectedMcpServers.add(name);
   }
+  const mcpServerFingerprints = mcpServers.map((name) => {
+    const identities = configuredMcpServers.filter((server) => server.name === name);
+    if (identities.length === 0) throw new Error(`MCP server "${name}" has no safe configuration identity.`);
+    if (identities.length !== 1) throw new Error(`MCP server "${name}" has ambiguous configuration identities.`);
+    if (!availableTools.some((tool) => tool.mcpServer === name)) {
+      throw new Error(`MCP server "${name}" is unavailable in the parent runtime.`);
+    }
+    return { ...identities[0] };
+  });
 
   const extensions = (profile.extensions ?? []).map((name) => {
     if (!name || name.trim() !== name || name.includes(",") || /[*?]/.test(name)) {
       throw new Error(`Invalid extension reference "${name}"; use an exact registered name.`);
     }
     if (name === "builtin:mcp") {
-      throw new Error(MCP_RUNTIME_UNAVAILABLE);
+      throw new Error('The generic built-in MCP extension is not a selectable resource; use "mcp_servers".');
     }
 
     const matches = registeredExtensions.filter((extension) => extension.name === name);
@@ -190,18 +232,35 @@ export function resolveExplicitLoadout(
     if (matches.length === 0) throw new Error(`Tool grant "${name}" is not available in the parent runtime.`);
     if (matches.length !== 1) throw new Error(`Tool grant "${name}" has ambiguous providers.`);
 
-    const provider = matches[0].provider;
-    if (!matches[0].contractFingerprint) throw new Error(`Tool grant "${name}" has no verifiable tool contract.`);
-    const isCoreBuiltin = BUILTIN_TOOLS.has(name) && provider === `builtin:${name}`;
-    const selectedProvider = extensions.some((extension) => extension.path === provider);
-    if (!isCoreBuiltin && !selectedProvider) {
-      throw new Error(`Tool grant "${name}" is not provided by an explicitly selected resource.`);
+    const tool = matches[0];
+    if (!tool.contractFingerprint) throw new Error(`Tool grant "${name}" has no verifiable tool contract.`);
+    if (GENERIC_MCP_TOOLS.has(name)) {
+      throw new Error(`Generic MCP proxy/search tool "${name}" is not available in explicit loadouts.`);
     }
-    if (name.startsWith("mcp__")) throw new Error(MCP_RUNTIME_UNAVAILABLE);
-    toolProviders.push({ name, provider, contractFingerprint: matches[0].contractFingerprint });
+
+    if (tool.provider === "builtin:mcp") {
+      if (!tool.mcpServer || !selectedMcpServers.has(tool.mcpServer)) {
+        throw new Error(`Tool grant "${name}" is not provided by an explicitly selected resource.`);
+      }
+    } else {
+      if (tool.mcpServer || name.startsWith("mcp__")) {
+        throw new Error(`MCP tool "${name}" has an unexpected provider identity.`);
+      }
+      const isCoreBuiltin = BUILTIN_TOOLS.has(name) && tool.provider === `builtin:${name}`;
+      const selectedProvider = extensions.some((extension) => extension.path === tool.provider);
+      if (!isCoreBuiltin && !selectedProvider) {
+        throw new Error(`Tool grant "${name}" is not provided by an explicitly selected resource.`);
+      }
+    }
+    toolProviders.push({
+      name,
+      provider: tool.provider,
+      ...(tool.mcpServer ? { mcpServer: tool.mcpServer } : {}),
+      contractFingerprint: tool.contractFingerprint,
+    });
   }
 
-  return { extensions, mcpServers: [], toolProviders };
+  return { extensions, mcpServers, mcpServerFingerprints, toolProviders };
 }
 
 export interface ExplicitLoadoutValidationContext {
@@ -209,6 +268,7 @@ export interface ExplicitLoadoutValidationContext {
   registeredExtensions?: readonly RegisteredSubagentExtension[];
   requirePinnedContracts?: boolean;
   currentTools?: readonly ResolvedToolProvider[];
+  currentMcpServers?: readonly McpServerIdentity[];
 }
 
 export function validateExplicitLoadoutSnapshot(
@@ -217,6 +277,7 @@ export function validateExplicitLoadoutSnapshot(
     runtimeVersion: string;
     extensions: readonly RegisteredSubagentExtension[];
     mcpServers: readonly string[];
+    mcpServerFingerprints?: readonly McpServerIdentity[];
     toolProviders: readonly ResolvedToolProvider[];
     runnerFiles: readonly { path: string; fingerprint: string }[];
   },
@@ -225,8 +286,40 @@ export function validateExplicitLoadoutSnapshot(
   const currentExtensions = context.registeredExtensions ?? [];
 
   if (snapshot.version !== 1) throw new Error("Unsupported explicit subagent loadout snapshot version.");
-  if (!Array.isArray(snapshot.extensions) || !Array.isArray(snapshot.mcpServers) || snapshot.mcpServers.length > 0) {
-    throw new Error("Invalid or unsupported explicit subagent loadout resources.");
+  if (
+    !Array.isArray(snapshot.extensions) ||
+    !Array.isArray(snapshot.mcpServers) ||
+    snapshot.mcpServers.some((name) => typeof name !== "string" || !/^[a-zA-Z0-9_-]+$/.test(name)) ||
+    new Set(snapshot.mcpServers).size !== snapshot.mcpServers.length
+  ) {
+    throw new Error("Invalid explicit subagent loadout resources.");
+  }
+  const mcpFingerprints = snapshot.mcpServerFingerprints ?? [];
+  if (
+    !Array.isArray(mcpFingerprints) ||
+    mcpFingerprints.length !== snapshot.mcpServers.length ||
+    mcpFingerprints.some(
+      (server) =>
+        !snapshot.mcpServers.includes(server.name) ||
+        typeof server.fingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/.test(server.fingerprint),
+    ) ||
+    new Set(mcpFingerprints.map((server) => server.name)).size !== mcpFingerprints.length
+  ) {
+    throw new Error("Explicit subagent loadout has missing or invalid MCP configuration identities.");
+  }
+  if (snapshot.mcpServers.length > 0) {
+    if (!context.currentMcpServers) {
+      throw new Error("Current MCP configuration identity is unavailable; a fresh subagent spawn is required.");
+    }
+    for (const expected of mcpFingerprints) {
+      const matches = context.currentMcpServers.filter((server) => server.name === expected.name);
+      if (matches.length !== 1 || matches[0].fingerprint !== expected.fingerprint) {
+        throw new Error(
+          `MCP server "${expected.name}" changed configuration identity; a fresh subagent spawn is required.`,
+        );
+      }
+    }
   }
   if (!Array.isArray(snapshot.toolProviders) || !Array.isArray(snapshot.runnerFiles)) {
     throw new Error("Explicit subagent loadout is missing its provider-bound policy snapshot.");
@@ -289,6 +382,7 @@ export function authorizeToolCall(
   if (
     matches.length !== 1 ||
     matches[0].provider !== grant.provider ||
+    matches[0].mcpServer !== grant.mcpServer ||
     !grant.contractFingerprint ||
     matches[0].contractFingerprint !== grant.contractFingerprint
   ) {
@@ -310,7 +404,11 @@ export function validateToolProviderGrants(
     if (matches.length === 0) throw new Error(`Granted tool "${grant.name}" is unavailable.`);
     if (matches.length !== 1) throw new Error(`Granted tool "${grant.name}" has ambiguous providers.`);
     if (!grant.contractFingerprint) throw new Error(`Granted tool "${grant.name}" has no pinned contract.`);
-    if (matches[0].provider !== grant.provider || matches[0].contractFingerprint !== grant.contractFingerprint) {
+    if (
+      matches[0].provider !== grant.provider ||
+      matches[0].mcpServer !== grant.mcpServer ||
+      matches[0].contractFingerprint !== grant.contractFingerprint
+    ) {
       throw new Error(`Granted tool "${grant.name}" changed provider or contract; a fresh subagent spawn is required.`);
     }
   }
