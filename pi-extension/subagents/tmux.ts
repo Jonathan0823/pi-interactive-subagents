@@ -12,31 +12,43 @@
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
 // ── Availability ──
 
-const commandAvailability = new Map<string, boolean>();
+const commandPaths = new Map<string, string | null>();
+
+function resolveCommand(command: string): string | undefined {
+  if (commandPaths.has(command)) return commandPaths.get(command) ?? undefined;
+
+  const executable = (process.env.PATH ?? "")
+    .split(":")
+    .map((directory) => resolve(directory || process.cwd(), command))
+    .find((path) => {
+      try {
+        accessSync(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  commandPaths.set(command, executable ?? null);
+  return executable;
+}
 
 function hasCommand(command: string): boolean {
-  if (commandAvailability.has(command)) {
-    return commandAvailability.get(command)!;
-  }
+  return resolveCommand(command) !== undefined;
+}
 
-  let available = false;
-  try {
-    execFileSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" });
-    available = true;
-  } catch {
-    available = false;
-  }
-
-  commandAvailability.set(command, available);
-  return available;
+function tmuxExecutable(): string {
+  const executable = resolveCommand("tmux");
+  if (!executable) throw new Error(`tmux is required for subagents. ${muxSetupHint()}`);
+  return executable;
 }
 
 /**
@@ -64,7 +76,8 @@ function requireTmux(): void {
 // ── Shell helpers ──
 
 export function shellEscape(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+  const escapedQuote = String.raw`'\''`;
+  return `'${s.replaceAll("'", escapedQuote)}'`;
 }
 
 // ── Pane layout ──
@@ -95,7 +108,7 @@ function rebalanceSurfaces(hintPane?: string): void {
     rebalanceTimer = null;
     try {
       // -t <pane> resolves to that pane's window; does not change focus.
-      execFileSync("tmux", ["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT], {
+      execFileSync(tmuxExecutable(), ["select-layout", "-t", target, SUBAGENT_TMUX_LAYOUT], {
         encoding: "utf8",
       });
     } catch {
@@ -114,7 +127,7 @@ function rebalanceSurfaces(hintPane?: string): void {
  * Returns the new pane id (e.g. `%12`).
  */
 export function createSurface(name: string): string {
-  void name; // tmux panes are not named; the pi process inside shows its own title.
+  // tmux panes are not named; the pi process inside shows its own title.
   return createSurfaceSplit(name, "right", process.env.TMUX_PANE);
 }
 
@@ -123,11 +136,11 @@ export function createSurface(name: string): string {
  * Returns the new pane id (e.g. `%12`).
  */
 export function createSurfaceSplit(
-  name: string,
+  _name: string,
   direction: "left" | "right" | "up" | "down",
   fromSurface?: string,
 ): string {
-  void name;
+  // tmux panes are not named; retain the argument for API compatibility.
   requireTmux();
 
   const args = ["split-window", "-d"];
@@ -144,7 +157,7 @@ export function createSurfaceSplit(
   }
   args.push("-P", "-F", "#{pane_id}");
 
-  const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
+  const pane = execFileSync(tmuxExecutable(), args, { encoding: "utf8" }).trim();
   if (!pane.startsWith("%")) {
     throw new Error(`Unexpected tmux split-window output: ${pane}`);
   }
@@ -160,8 +173,8 @@ export function createSurfaceSplit(
  */
 export function sendCommand(surface: string, command: string): void {
   requireTmux();
-  execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
-  execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+  execFileSync(tmuxExecutable(), ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
+  execFileSync(tmuxExecutable(), ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
 }
 
 /**
@@ -181,8 +194,7 @@ export function sendLongCommand(
   options?: { scriptPath?: string; scriptPreamble?: string },
 ): string {
   const scriptPath =
-    options?.scriptPath ??
-    join(tmpdir(), "pi-subagent-scripts", `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`);
+    options?.scriptPath ?? join(tmpdir(), "pi-subagent-scripts", `cmd-${randomBytes(8).toString("hex")}.sh`);
   mkdirSync(dirname(scriptPath), { recursive: true });
 
   const scriptParts = ["#!/bin/bash"];
@@ -191,7 +203,7 @@ export function sendLongCommand(
   }
   scriptParts.push(command);
 
-  writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
+  writeFileSync(scriptPath, `${scriptParts.join("\n")}\n`, {
     mode: 0o755,
   });
   sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
@@ -203,7 +215,7 @@ export function sendLongCommand(
  */
 export function readScreen(surface: string, lines = 50): string {
   requireTmux();
-  return execFileSync("tmux", ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`], {
+  return execFileSync(tmuxExecutable(), ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`], {
     encoding: "utf8",
   });
 }
@@ -214,7 +226,7 @@ export function readScreen(surface: string, lines = 50): string {
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
   requireTmux();
   const { stdout } = await execFileAsync(
-    "tmux",
+    tmuxExecutable(),
     ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
     { encoding: "utf8" },
   );
@@ -226,7 +238,7 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
  */
 export function closeSurface(surface: string): void {
   requireTmux();
-  execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
+  execFileSync(tmuxExecutable(), ["kill-pane", "-t", surface], { encoding: "utf8" });
   rebalanceSurfaces();
 }
 
@@ -250,10 +262,10 @@ export interface PollResult {
  * Note: ask_question does NOT write a `.exit` sidecar — it keeps the session
  * open and signals the parent via a separate `.ask` file (see deliverPendingQuestion).
  */
-function interpretExitSidecar(data: any): PollResult {
-  if (data?.type === "error") {
+function interpretExitSidecar(data: unknown): PollResult {
+  if (typeof data === "object" && data !== null && "type" in data && data.type === "error") {
     const errorMessage =
-      typeof data.errorMessage === "string" && data.errorMessage.trim() !== ""
+      "errorMessage" in data && typeof data.errorMessage === "string" && data.errorMessage.trim() !== ""
         ? data.errorMessage
         : "Subagent exited with stopReason=error (no errorMessage in sidecar).";
     return { reason: "error", exitCode: 1, errorMessage };
@@ -268,6 +280,69 @@ export const __pollForExitTest__ = { interpretExitSidecar };
  * (written by the error path), falling back to the terminal sentinel for
  * clean-completion and crash detection.
  */
+function readExitSidecar(sessionFile?: string): PollResult | undefined {
+  if (!sessionFile) return undefined;
+  try {
+    const exitFile = `${sessionFile}.exit`;
+    if (!existsSync(exitFile)) return undefined;
+    const data = JSON.parse(readFileSync(exitFile, "utf-8"));
+    rmSync(exitFile, { force: true });
+    return interpretExitSidecar(data);
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForPollInterval(signal: AbortSignal, interval: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("Aborted"));
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, interval);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new Error("Aborted"));
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function checkSentinelFile(sentinelFile?: string): PollResult | undefined {
+  if (!sentinelFile) return undefined;
+  try {
+    if (existsSync(sentinelFile)) return { reason: "sentinel", exitCode: 0 };
+  } catch {
+    // A missing or inaccessible sentinel is not an exit signal.
+  }
+  return undefined;
+}
+
+function parseTerminalSentinel(screen: string): PollResult | undefined {
+  const match = /__SUBAGENT_DONE_(\d+)__/.exec(screen);
+  return match ? { reason: "sentinel", exitCode: Number.parseInt(match[1], 10) } : undefined;
+}
+
+async function checkTerminalExit(surface: string, sessionFile?: string): Promise<PollResult | undefined> {
+  try {
+    return parseTerminalSentinel(await readScreenAsync(surface, 5));
+  } catch {
+    // Surface may have been destroyed — check if .exit file appeared in the meantime.
+    return readExitSidecar(sessionFile);
+  }
+}
+
+async function checkPollExit(
+  surface: string,
+  options: { sessionFile?: string; sentinelFile?: string },
+): Promise<PollResult | undefined> {
+  return (
+    readExitSidecar(options.sessionFile) ??
+    checkSentinelFile(options.sentinelFile) ??
+    (await checkTerminalExit(surface, options.sessionFile))
+  );
+}
+
 export async function pollForExit(
   surface: string,
   signal: AbortSignal,
@@ -285,62 +360,13 @@ export async function pollForExit(
       throw new Error("Aborted while waiting for subagent to finish");
     }
 
-    // Fast path: check for .exit sidecar file (written by the error path)
-    if (options.sessionFile) {
-      try {
-        const exitFile = `${options.sessionFile}.exit`;
-        if (existsSync(exitFile)) {
-          const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-          rmSync(exitFile, { force: true });
-          return interpretExitSidecar(data);
-        }
-      } catch {}
-    }
-
-    // Check Claude sentinel file (written by plugin Stop hook)
-    if (options.sentinelFile) {
-      try {
-        if (existsSync(options.sentinelFile)) {
-          return { reason: "sentinel", exitCode: 0 };
-        }
-      } catch {}
-    }
-
-    // Slow path: read terminal screen for sentinel (crash detection)
-    try {
-      const screen = await readScreenAsync(surface, 5);
-      const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
-      if (match) {
-        return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
-      }
-    } catch {
-      // Surface may have been destroyed — check if .exit file appeared in the meantime
-      if (options.sessionFile) {
-        try {
-          const exitFile = `${options.sessionFile}.exit`;
-          if (existsSync(exitFile)) {
-            const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-            rmSync(exitFile, { force: true });
-            return interpretExitSidecar(data);
-          }
-        } catch {}
-      }
-    }
+    const result = await checkPollExit(surface, options);
+    if (result) return result;
 
     const elapsed = Math.floor((Date.now() - start) / 1000);
     options.onTick?.(elapsed);
 
-    await new Promise<void>((resolve, reject) => {
-      if (signal.aborted) return reject(new Error("Aborted"));
-      const timer = setTimeout(() => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      }, options.interval);
-      function onAbort() {
-        clearTimeout(timer);
-        reject(new Error("Aborted"));
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    // Polling is inherently sequential: each check follows the prior interval.
+    await waitForPollInterval(signal, options.interval); // NOSONAR
   }
 }

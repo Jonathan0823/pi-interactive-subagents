@@ -63,8 +63,7 @@ export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[]
   // pair this with findLatestAssistantError() so the parent learns it was an
   // error, not a clean completion.
   if (messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
+    for (const msg of messages.toReversed()) {
       if (msg?.role === "assistant") {
         return msg.stopReason !== "aborted";
       }
@@ -90,8 +89,7 @@ export interface SubagentErrorInfo {
  */
 export function findLatestAssistantError(messages: any[] | undefined): SubagentErrorInfo | null {
   if (!messages) return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
+  for (const msg of messages.toReversed()) {
     if (msg?.role !== "assistant") continue;
     if (msg.stopReason !== "error") return null;
     const raw = typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
@@ -110,7 +108,7 @@ export function parseDeniedTools(rawValue: string | undefined): string[] {
     .filter(Boolean);
 }
 
-export default function (pi: ExtensionAPI) {
+export default function subagentDone(pi: ExtensionAPI) {
   let toolNames: string[] = [];
   let denied: string[] = [];
   let expanded = false;
@@ -125,7 +123,7 @@ export default function (pi: ExtensionAPI) {
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
   });
 
-  function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
+  function renderWidget(ctx: { ui: { setWidget: (...args: any[]) => void } }, _theme: any) {
     ctx.ui.setWidget(
       "subagent-tools",
       (_tui: any, theme: any) => {
@@ -144,7 +142,7 @@ export default function (pi: ExtensionAPI) {
           let deniedLine = "";
           if (denied.length > 0) {
             const deniedList = denied.map((name: string) => theme.fg("error", name)).join(theme.fg("muted", ", "));
-            deniedLine = "\n" + theme.fg("muted", "denied: ") + deniedList;
+            deniedLine = `\n${theme.fg("muted", "denied: ")}${deniedList}`;
           }
 
           const content = new Text(`${agentTag}${countInfo}${hint}\n${toolList}${deniedLine}`, 0, 0);
@@ -179,7 +177,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     recorder.sessionStart();
     const tools = pi.getAllTools();
-    toolNames = tools.map((t) => t.name).sort();
+    toolNames = tools
+      .map((t) => t.name)
+      .toSorted((a, b) => {
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+      });
     denied = parseDeniedTools(deniedToolsValue);
 
     renderWidget(ctx, null);
@@ -355,7 +359,7 @@ export default function (pi: ExtensionAPI) {
           "The single freeform question to ask the orchestrator. Include enough context to answer it directly.",
       }),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       if (!sessionFile) {
         throw new Error(

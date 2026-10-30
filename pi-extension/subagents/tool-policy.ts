@@ -20,7 +20,7 @@ interface ExplicitLoadoutPolicy {
 
 function currentProviders(pi: any): ResolvedToolProvider[] {
   if (typeof pi.getAllTools !== "function") {
-    throw new Error("This Pi runtime does not expose the tool metadata required for strict subagent permissions.");
+    throw new TypeError("This Pi runtime does not expose the tool metadata required for strict subagent permissions.");
   }
   return snapshotToolProviders(pi.getAllTools());
 }
@@ -40,16 +40,141 @@ function writeReadinessState(path: string, state: "pending" | "validated" | "rea
   chmodSync(path, 0o600);
 }
 
-export function createToolPolicyHandlers(
+type ToolPolicyHandlerArguments = [
   grants: readonly ResolvedToolProvider[],
   getProviders: () => ResolvedToolProvider[],
   onPinned?: (grants: readonly ResolvedToolProvider[]) => void,
   onReady?: () => void,
   onValidated?: () => void,
   validateMcpConfiguration?: () => void,
-  childOnlyExtensionPaths: readonly string[] = [],
+  childOnlyExtensionPaths?: readonly string[],
   onPending?: () => void,
-) {
+];
+
+function pinAvailableStartupGrant(
+  grant: ResolvedToolProvider,
+  matches: ResolvedToolProvider[],
+  childOnlyExtensionPaths: readonly string[],
+): boolean {
+  const provider = matches[0];
+  if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) {
+    if (matches.length !== 1 || !childOnlyExtensionPaths.includes(provider.provider) || !provider.contractFingerprint) {
+      throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
+    }
+    grant.provider = provider.provider;
+  } else if (matches.length !== 1 || provider.provider !== grant.provider || !provider.contractFingerprint) {
+    throw new Error(`Runner-managed tool "${grant.name}" has an unexpected provider or contract.`);
+  }
+  grant.contractFingerprint = provider.contractFingerprint;
+  return true;
+}
+
+function pinStartupGrant(
+  grant: ResolvedToolProvider,
+  providers: readonly ResolvedToolProvider[],
+  childOnlyExtensionPaths: readonly string[],
+  deferredGrants: Set<ResolvedToolProvider>,
+): boolean {
+  const matches = providers.filter((provider) => provider.name === grant.name);
+  if (grant.contractFingerprint) {
+    if (childOnlyExtensionPaths.includes(grant.provider) && matches.length === 0) deferredGrants.add(grant);
+    return false;
+  }
+  if (!grant.runnerManaged) throw new Error(`Tool grant "${grant.name}" has no pinned contract.`);
+  if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER && matches.length === 0) {
+    deferredGrants.add(grant);
+    return false;
+  }
+  return pinAvailableStartupGrant(grant, matches, childOnlyExtensionPaths);
+}
+
+function pinStartupGrants(
+  grants: ResolvedToolProvider[],
+  providers: readonly ResolvedToolProvider[],
+  childOnlyExtensionPaths: readonly string[],
+  deferredGrants: Set<ResolvedToolProvider>,
+): boolean {
+  let pinned = false;
+  for (const grant of grants) {
+    pinned = pinStartupGrant(grant, providers, childOnlyExtensionPaths, deferredGrants) || pinned;
+  }
+  return pinned;
+}
+
+async function waitForGrantedProviders(
+  grants: readonly ResolvedToolProvider[],
+  deferredChildOnly: ReadonlySet<ResolvedToolProvider>,
+  childOnlyExtensionPaths: readonly string[],
+  getProviders: () => ResolvedToolProvider[],
+  deadline: number,
+  hasMcpGrants: boolean,
+): Promise<boolean> {
+  let pinned = false;
+  while (true) {
+    const providers = getProviders();
+    const { pending: pendingChildren, pinned: newlyPinned } = resolveDeferredChildGrants(
+      deferredChildOnly,
+      providers,
+      childOnlyExtensionPaths,
+    );
+    pinned ||= newlyPinned;
+    const pendingMcp = hasMcpGrants
+      ? grants.filter((grant) => grant.mcpServer && !providers.some((provider) => provider.name === grant.name))
+      : [];
+    if (pendingChildren.length === 0 && pendingMcp.length === 0) {
+      validateToolProviderGrants(grants, providers);
+      return pinned;
+    }
+    if (Date.now() >= deadline) {
+      const pending = pendingChildren[0] ?? pendingMcp[0];
+      throw new Error(`Granted tool "${pending.name}" is unavailable.`);
+    }
+    // Provider registration is asynchronous; re-read only after each bounded polling delay.
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now()))); // NOSONAR: polling must serialize each registry refresh.
+  }
+}
+
+function resolveDeferredChildGrants(
+  grants: ReadonlySet<ResolvedToolProvider>,
+  providers: readonly ResolvedToolProvider[],
+  childOnlyExtensionPaths: readonly string[],
+): { pending: ResolvedToolProvider[]; pinned: boolean } {
+  const pending: ResolvedToolProvider[] = [];
+  let pinned = false;
+  for (const grant of grants) {
+    const matches = providers.filter((provider) => provider.name === grant.name);
+    if (matches.length > 1) throw new Error(`Child-only extension tool "${grant.name}" has ambiguous providers.`);
+    if (matches.length === 0) {
+      pending.push(grant);
+      continue;
+    }
+    const provider = matches[0];
+    if (!childOnlyExtensionPaths.includes(provider.provider) || !provider.contractFingerprint) {
+      throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
+    }
+    if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) grant.provider = provider.provider;
+    else if (grant.provider !== provider.provider) {
+      throw new Error(`Child-only extension tool "${grant.name}" changed provider.`);
+    }
+    if (!grant.contractFingerprint) {
+      grant.contractFingerprint = provider.contractFingerprint;
+      pinned = true;
+    }
+  }
+  return { pending, pinned };
+}
+
+export function createToolPolicyHandlers(...args: ToolPolicyHandlerArguments) {
+  const [
+    grants,
+    getProviders,
+    onPinned,
+    onReady,
+    onValidated,
+    validateMcpConfiguration,
+    childOnlyExtensionPaths = [],
+    onPending,
+  ] = args;
   const effectiveGrants = grants.map((grant) => ({ ...grant }));
   const hasMcpGrants = effectiveGrants.some((grant) => Boolean(grant.mcpServer));
   const deferredChildOnlyGrants = new Set<ResolvedToolProvider>();
@@ -62,39 +187,7 @@ export function createToolPolicyHandlers(
       try {
         validateMcpConfiguration?.();
         const providers = getProviders();
-        let pinned = false;
-        for (const grant of effectiveGrants) {
-          const matches = providers.filter((provider) => provider.name === grant.name);
-          if (grant.contractFingerprint) {
-            if (childOnlyExtensionPaths.includes(grant.provider) && matches.length === 0) {
-              deferredChildOnlyGrants.add(grant);
-            }
-            continue;
-          }
-          if (!grant.runnerManaged) throw new Error(`Tool grant "${grant.name}" has no pinned contract.`);
-          if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) {
-            if (matches.length === 0) {
-              deferredChildOnlyGrants.add(grant);
-              continue;
-            }
-            if (
-              matches.length !== 1 ||
-              !childOnlyExtensionPaths.includes(matches[0].provider) ||
-              !matches[0].contractFingerprint
-            ) {
-              throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
-            }
-            grant.provider = matches[0].provider;
-          } else if (
-            matches.length !== 1 ||
-            matches[0].provider !== grant.provider ||
-            !matches[0].contractFingerprint
-          ) {
-            throw new Error(`Runner-managed tool "${grant.name}" has an unexpected provider or contract.`);
-          }
-          grant.contractFingerprint = matches[0].contractFingerprint;
-          pinned = true;
-        }
+        const pinned = pinStartupGrants(effectiveGrants, providers, childOnlyExtensionPaths, deferredChildOnlyGrants);
         validateToolProviderGrants(
           effectiveGrants.filter((grant) => !grant.mcpServer && !deferredChildOnlyGrants.has(grant)),
           providers,
@@ -139,46 +232,14 @@ export function createToolPolicyHandlers(
         if (!Number.isSafeInteger(deadline) || deadline <= 0) {
           throw new Error("Explicit subagent startup deadline is missing or invalid.");
         }
-        let pinned = false;
-        while (true) {
-          const providers = getProviders();
-          const pendingChildOnly: ResolvedToolProvider[] = [];
-          for (const grant of deferredChildOnlyGrants) {
-            const matches = providers.filter((provider) => provider.name === grant.name);
-            if (matches.length > 1)
-              throw new Error(`Child-only extension tool "${grant.name}" has ambiguous providers.`);
-            if (matches.length === 0) {
-              pendingChildOnly.push(grant);
-              continue;
-            }
-            const provider = matches[0];
-            if (!childOnlyExtensionPaths.includes(provider.provider) || !provider.contractFingerprint) {
-              throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
-            }
-            if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) grant.provider = provider.provider;
-            else if (grant.provider !== provider.provider) {
-              throw new Error(`Child-only extension tool "${grant.name}" changed provider.`);
-            }
-            if (!grant.contractFingerprint) {
-              grant.contractFingerprint = provider.contractFingerprint;
-              pinned = true;
-            }
-          }
-          const pendingMcp = hasMcpGrants
-            ? effectiveGrants.filter(
-                (grant) => grant.mcpServer && !providers.some((provider) => provider.name === grant.name),
-              )
-            : [];
-          if (pendingChildOnly.length === 0 && pendingMcp.length === 0) {
-            validateToolProviderGrants(effectiveGrants, providers);
-            break;
-          }
-          if (Date.now() >= deadline) {
-            const pending = pendingChildOnly[0] ?? pendingMcp[0];
-            throw new Error(`Granted tool "${pending.name}" is unavailable.`);
-          }
-          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
-        }
+        const pinned = await waitForGrantedProviders(
+          effectiveGrants,
+          deferredChildOnlyGrants,
+          childOnlyExtensionPaths,
+          getProviders,
+          deadline,
+          hasMcpGrants,
+        );
         if (pinned) onPinned?.(effectiveGrants);
         onValidated?.();
         validated = true;
@@ -266,7 +327,7 @@ export default function subagentToolPolicy(pi: any): void {
         return;
       }
       if (typeof pi.getMcpServers !== "function") {
-        throw new Error("This Pi runtime does not expose configured MCP server identities.");
+        throw new TypeError("This Pi runtime does not expose configured MCP server identities.");
       }
       const current = resolveMcpServerIdentities(names, {
         agentDir: process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
@@ -316,29 +377,30 @@ export default function subagentToolPolicy(pi: any): void {
       }
     }
   });
-  pi.on("before_agent_start", async (_event: unknown, ctx: any) => {
-    const error = await handlers.beforeAgentStart({ shutdown: () => ctx.shutdown() });
-    if (!error) return;
-    console.error(`Explicit subagent loadout rejected before model use: ${error}`);
-    const sessionFile = process.env.PI_SUBAGENT_SESSION;
-    if (!sessionFile) return;
-    try {
-      const failurePath = `${sessionFile}.exit`;
-      writeFileSync(
-        failurePath,
-        JSON.stringify({
-          type: "error",
-          errorMessage: `Explicit subagent loadout rejected before model use: ${error}`,
-        }),
-        { encoding: "utf8", mode: 0o600 },
-      );
-      chmodSync(failurePath, 0o600);
-    } catch {
-      // The child still shuts down; failure to report it must not make it runnable.
-    }
-  });
-  pi.on("input", async (_event: unknown, ctx: any) => {
-    const result = await handlers.handleInput({ shutdown: () => ctx.shutdown() });
+  pi.on("before_agent_start", (_event: unknown, ctx: any) =>
+    handlers.beforeAgentStart({ shutdown: () => ctx.shutdown() }).then((error) => {
+      if (!error) return;
+      console.error(`Explicit subagent loadout rejected before model use: ${error}`);
+      const sessionFile = process.env.PI_SUBAGENT_SESSION;
+      if (!sessionFile) return;
+      try {
+        const failurePath = `${sessionFile}.exit`;
+        writeFileSync(
+          failurePath,
+          JSON.stringify({
+            type: "error",
+            errorMessage: `Explicit subagent loadout rejected before model use: ${error}`,
+          }),
+          { encoding: "utf8", mode: 0o600 },
+        );
+        chmodSync(failurePath, 0o600);
+      } catch {
+        // The child still shuts down; failure to report it must not make it runnable.
+      }
+    }),
+  );
+  pi.on("input", (_event: unknown, ctx: any) => {
+    const result = handlers.handleInput({ shutdown: () => ctx.shutdown() });
     if (result.action === "handled") {
       const reason = handlers.failureReason() ?? "startup validation failed.";
       console.error(`Explicit subagent loadout rejected before model use: ${reason}`);

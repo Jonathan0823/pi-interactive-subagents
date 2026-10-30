@@ -133,7 +133,7 @@ function validateOptionalActivityString(object: Record<string, unknown>, fieldNa
   const value = object[fieldName];
   if (value == null) return null;
   if (typeof value !== "string") return `${fieldName} must be a string when present`;
-  if (/\r|\n/.test(value)) return `${fieldName} must not contain newlines`;
+  if (/[\r\n]/.test(value)) return `${fieldName} must not contain newlines`;
   return value.length <= MAX_ACTIVITY_STRING_LENGTH ? null : `${fieldName} is too long`;
 }
 
@@ -207,9 +207,8 @@ export function writeSubagentActivityFile(activityFile: string, activity: Subage
   } catch (error) {
     try {
       unlinkSync(tempFile);
-    } catch (cleanupError) {
+    } catch {
       // Temp cleanup is best effort; preserve the original write/rename failure
-      void cleanupError;
     }
     throw error;
   }

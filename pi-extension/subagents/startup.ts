@@ -35,7 +35,7 @@ export function buildStartupDeadlineCommand(options: StartupDeadlineCommandOptio
     "  checks=$((checks + 1))",
     "done",
     `if [ "$checks" -ge ${checks} ] && ! grep -qx ready "$ready_file" 2>/dev/null && [ ! -s "$exit_file" ] && kill -0 "$child_pid" 2>/dev/null; then`,
-    `  printf '%s\\n' ${options.escape(timeoutPayload)} > "$exit_file"`,
+    String.raw`  printf '%s\n' ${options.escape(timeoutPayload)} > "$exit_file"`,
     "fi",
     `if [ -s "$exit_file" ] && kill -0 "$child_pid" 2>/dev/null; then`,
     '  kill -TERM "$child_pid" 2>/dev/null || true',
