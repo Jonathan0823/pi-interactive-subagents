@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import type { ExplicitSubagentLoadout } from "./loadout.ts";
+import type { ChildOnlyExtension, ExplicitSubagentLoadout } from "./loadout.ts";
 
 export interface SessionEntry {
   type: string;
@@ -98,6 +98,8 @@ export function seedSubagentSessionFile(params: {
 export interface SubagentLoadout {
   /** Present only when the profile opted into strict, explicit loading. */
   explicitLoadout?: ExplicitSubagentLoadout;
+  /** Explicit child-only extension files, pinned by content fingerprint. */
+  subagentOnlyExtensions?: ChildOnlyExtension[];
   /** Agent profile name (for PI_SUBAGENT_AGENT); null for agentless spawns. */
   agent: string | null;
   /** The `--tools` allowlist string, or null when the spawn was unrestricted. */

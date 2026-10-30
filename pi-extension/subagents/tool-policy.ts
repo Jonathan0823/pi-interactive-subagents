@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { resolveMcpServerIdentities, type McpServerIdentity } from "./mcp-identity.ts";
 import {
   authorizeToolCall,
+  CHILD_ONLY_EXTENSION_PROVIDER,
   snapshotToolProviders,
   validateToolProviderGrants,
   type ResolvedToolProvider,
@@ -13,6 +14,7 @@ interface ExplicitLoadoutPolicy {
   version: 1;
   mcpServers?: string[];
   mcpServerFingerprints?: McpServerIdentity[];
+  subagentOnlyExtensions?: Array<{ path: string; fingerprint: string }>;
   toolProviders: ResolvedToolProvider[];
 }
 
@@ -45,6 +47,7 @@ export function createToolPolicyHandlers(
   onReady?: () => void,
   onValidated?: () => void,
   validateMcpConfiguration?: () => void,
+  childOnlyExtensionPaths: readonly string[] = [],
 ) {
   const effectiveGrants = grants.map((grant) => ({ ...grant }));
   const hasMcpGrants = effectiveGrants.some((grant) => Boolean(grant.mcpServer));
@@ -61,7 +64,20 @@ export function createToolPolicyHandlers(
           if (grant.contractFingerprint) continue;
           if (!grant.runnerManaged) throw new Error(`Tool grant "${grant.name}" has no pinned contract.`);
           const matches = providers.filter((provider) => provider.name === grant.name);
-          if (matches.length !== 1 || matches[0].provider !== grant.provider || !matches[0].contractFingerprint) {
+          if (grant.provider === CHILD_ONLY_EXTENSION_PROVIDER) {
+            if (
+              matches.length !== 1 ||
+              !childOnlyExtensionPaths.includes(matches[0].provider) ||
+              !matches[0].contractFingerprint
+            ) {
+              throw new Error(`Child-only extension tool "${grant.name}" has an unexpected provider or contract.`);
+            }
+            grant.provider = matches[0].provider;
+          } else if (
+            matches.length !== 1 ||
+            matches[0].provider !== grant.provider ||
+            !matches[0].contractFingerprint
+          ) {
             throw new Error(`Runner-managed tool "${grant.name}" has an unexpected provider or contract.`);
           }
           grant.contractFingerprint = matches[0].contractFingerprint;
@@ -216,6 +232,7 @@ export default function subagentToolPolicy(pi: any): void {
         }
       }
     },
+    (policy.subagentOnlyExtensions ?? []).map((extension) => extension.path),
   );
   pi.on("session_start", (_event: unknown, ctx: any) => {
     const error = handlers.start({ shutdown: () => ctx.shutdown() });

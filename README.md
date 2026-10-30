@@ -95,9 +95,9 @@ name: my-agent
 description: Does something specific
 model: openrouter/z-ai/glm-5.3
 thinking: medium
-tools: read, edit, write, safe_bash, web_search
+tools: read, edit, write, safe_bash, mcp:context-mode/ctx_search
 # Optional: opt into strict provider-bound tool checks and named extensions.
-# mcp_servers scopes tool grants; it does not isolate which configured servers connect.
+# mcp selectors expand to exact runtime tool grants; they do not isolate connections.
 extensions: builtin:codemode
 mcp_servers:
 session-mode: lineage-only
@@ -116,9 +116,10 @@ You are a specialized agent that does X...
 | `model` | string | Default model |
 | `fallback-model` | `pi-default` | Retry once with the parent session's current model after a provider/agent error. Pi CLI agents only; no retry if the parent model is unavailable or identical to the primary model |
 | `thinking` | string | `off`, `minimal`, `low`, `medium`, `high`, or `xhigh` (subject to model support); omit for Pi's configured default |
-| `tools` | string | Tool allowlist. Legacy profiles use the existing allowlist behavior. In explicit-loadout mode, exact tool names only; every direct or nested call is checked against its pinned provider and tool-contract fingerprint. |
+| `tools` | string | Tool allowlist. In explicit-loadout mode, exact names are checked against pinned providers and tool-contract fingerprints. `mcp:<server>` selects that server's currently available direct tools; `mcp:<server>/<tool>` selects one tool and expands to its exact canonical name. |
 | `extensions` | string | Optional comma-separated exact resource names. Presence opts into strict explicit-loadout mode, even when empty. Built-in extension names are discovered from Pi's registered tools (for example `builtin:codemode`). Third-party extensions may register a stable name, entrypoint, and identity; custom registered extensions currently require the same working directory as the parent. |
-| `mcp_servers` | string | Optional comma-separated exact configured MCP server names. Presence opts into strict mode. `tools` must name exact canonical MCP tools from these servers (for example `mcp__github__search`). This scopes tool grants, not server connections. |
+| `subagentOnlyExtensions` | string/list | Child-only Pi extension entrypoints. Paths may be absolute, `~/...`, or relative to the child working directory. The file fingerprint is saved and checked on resume. For a restricted child, list permitted extension tools in `tools`; omitting `tools` in a legacy profile keeps its normal default toolset. |
+| `mcp_servers` | string | Optional comma-separated exact configured MCP server names. Presence opts into strict mode. `tools` must name exact canonical MCP tools from these servers, or use `mcp:<server>` / `mcp:<server>/<tool>` selectors. This scopes tool grants, not server connections. |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
@@ -150,19 +151,31 @@ Controls whether `stalled`/`recovered` status transitions send a steer message t
 
 ## Tool access control
 
-Legacy profiles (without either `extensions` or `mcp_servers`) retain their earlier behavior. In particular, legacy `--tools` is not a nested-call authorization policy.
+Legacy profiles (without `extensions`, `mcp_servers`, or an `mcp:` tool selector) retain their earlier behavior. In particular, legacy `--tools` is not a nested-call authorization policy. `subagentOnlyExtensions` loads child-specific entrypoints but does not opt into strict authorization by itself.
+
+### Child-only extensions
+
+Use `subagentOnlyExtensions` to load Pi extension entrypoints only in the child. Paths resolve relative to the child's working directory; absolute and `~/...` paths are also supported. The selected files are fingerprinted in the session loadout and must remain unchanged on resume. Extension loading and tool authorization are separate: restricted children must list permitted tools in `tools`; omitting `tools` on a legacy profile retains the normal unrestricted default toolset.
+
+```markdown
+subagentOnlyExtensions:
+  - ./tools/web-access.ts
+extensions:
+tools: read, web_search, fetch_content
+```
+
+In strict mode, each requested child-only tool must be registered by one of the selected entrypoints; its provider path and tool contract are pinned during child startup. A harness-only tool such as `ffgrep` is not automatically a Pi child tool. Use Pi's built-in `grep`/`find` or load a real Pi extension that registers the desired tools. This package does not bundle a web provider; `pi-web-access` is a separate Pi extension that can be selected here after installation.
 
 ### Explicit loadouts (Pi 1.4.0+)
 
-Presence of `extensions` or `mcp_servers` selects strict mode. `extensions: builtin:codemode` explicitly loads Pi's codemode extension; list exact `tools` separately to authorize calls. For example:
+Presence of `extensions`, `mcp_servers`, or an `mcp:` selector in `tools` selects strict mode. `extensions: builtin:codemode` explicitly loads Pi's codemode extension; list exact `tools` separately to authorize calls. For example:
 
 ```markdown
 extensions: builtin:codemode
-mcp_servers:
-tools: read, grep, codemode
+tools: read, grep, codemode, mcp:context-mode/ctx_search
 ```
 
-Strict mode disables extension discovery and authorizes every direct or codemode-mediated tool call by exact name, provider identity, and pinned tool-contract fingerprint (description and parameter schema). For MCP, `mcp_servers` scopes which configured server may contribute a grant, and `tools` names the exact canonical `mcp__<server>__<tool>` tool. Unknown, ambiguous, unselected, or changed server/tool identities fail closed. Unscoped MCP resource and search proxies are not granted. Empty `mcp_servers:` explicitly disables MCP; a non-empty list explicitly loads Pi's built-in MCP extension.
+Strict mode disables extension discovery and authorizes every direct or codemode-mediated tool call by exact name, provider identity, and pinned tool-contract fingerprint (description and parameter schema). For MCP, `mcp_servers` scopes which configured server may contribute a grant. The `mcp:<server>` selector expands to that server's currently available direct tools, while `mcp:<server>/<tool>` selects one; both are resolved into exact canonical tool names before launch. Unknown, ambiguous, unselected, or changed server/tool identities fail closed. Unscoped MCP resource and search proxies are not granted. Empty `mcp_servers:` explicitly disables MCP; a non-empty list explicitly loads Pi's built-in MCP extension.
 
 **MCP selection is not connection isolation.** Pi uses the child's normal trusted MCP configuration and may connect every enabled server in it, not only the selected server. Other enabled servers may access their configured credentials and the network even though their tools are not granted to the child. Do not run strict-loadout children with MCP configurations you do not trust; tool authorization is not an OS sandbox. Loadout snapshots store only SHA-256 fingerprints of an allowlisted non-secret configuration projection, never raw MCP configuration or credential values. Secret-bearing environment/header values and URL credentials, query strings, and fragments are excluded; ambiguous config sources or configurations that cannot be fingerprinted safely fail closed. Tests use inert local fixtures and no live secrets. Legacy profiles are not affected.
 

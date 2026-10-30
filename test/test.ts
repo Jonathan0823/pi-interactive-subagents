@@ -1358,6 +1358,33 @@ describe("subagent discovery", () => {
     assert.ok(testApi.getToolExtensionPath("subagent")?.endsWith("index.ts"));
   });
 
+  it("opts MCP selectors into an explicit loadout", () => {
+    const parsed = testApi.parseAgentDefinition(
+      "---\nname: mcp-agent\ntools: read,mcp:context-mode\n---\n",
+      "mcp-agent",
+    );
+    assert.equal(parsed?.explicitLoadout, true);
+  });
+
+  it("loads subagent-only extension paths from frontmatter", () => {
+    const dir = createTestDir();
+    const agentsDir = join(dir, ".pi", "agents");
+    writeAgentFile(
+      agentsDir,
+      "child-extension-agent",
+      ["name: child-extension-agent", "subagentOnlyExtensions:", "  - ./tools/fast-search.ts"].join("\n"),
+    );
+    try {
+      const agent = testApi
+        .discoverAgentDefinitions(dir)
+        .find((candidate: any) => candidate.name === "child-extension-agent");
+      assert.deepEqual(agent?.subagentOnlyExtensions, ["./tools/fast-search.ts"]);
+      assert.equal(agent?.explicitLoadout, false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("ignores invalid session-mode values", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
@@ -1427,6 +1454,7 @@ describe("subagent discovery", () => {
 
     assert.deepEqual(resolved, {
       extensions: [{ name: "builtin:codemode", path: "builtin:codemode", identity: "builtin:codemode" }],
+      subagentOnlyExtensions: [],
       mcpServers: [],
       mcpServerFingerprints: [],
       toolProviders: [
@@ -1479,6 +1507,7 @@ describe("subagent discovery", () => {
 
     assert.deepEqual(resolved, {
       extensions: [],
+      subagentOnlyExtensions: [],
       mcpServers: ["selected"],
       mcpServerFingerprints: [{ name: "selected", fingerprint }],
       toolProviders: [available[0]],
@@ -1619,6 +1648,66 @@ describe("subagent discovery", () => {
         ),
       /unexpected provider identity/,
     );
+  });
+
+  it("expands MCP server and exact-tool selectors to provider-bound names", () => {
+    const available = [
+      {
+        name: "mcp__context_mode__ctx_search",
+        provider: "builtin:mcp",
+        mcpServer: "context-mode",
+        contractFingerprint: testContract,
+      },
+      {
+        name: "mcp__context_mode__ctx_stats",
+        provider: "builtin:mcp",
+        mcpServer: "context-mode",
+        contractFingerprint: testContract,
+      },
+      {
+        name: "mcp__rea__inspect_native_instruction",
+        provider: "builtin:mcp",
+        mcpServer: "rea",
+        contractFingerprint: testContract,
+      },
+    ];
+    assert.deepEqual(
+      testApi.expandMcpToolSelectors(["read", "mcp:context-mode", "mcp:rea/inspect_native_instruction"], available),
+      {
+        tools: [
+          "read",
+          "mcp__context_mode__ctx_search",
+          "mcp__context_mode__ctx_stats",
+          "mcp__rea__inspect_native_instruction",
+        ],
+        servers: ["context-mode", "rea"],
+      },
+    );
+    assert.throws(() => testApi.expandMcpToolSelectors(["mcp:missing"], available), /not available/);
+  });
+
+  it("creates exact grants for tools supplied only by selected child extensions", () => {
+    withTempDir((dir) => {
+      const extensionPath = join(dir, "web-access.ts");
+      writeFileSync(extensionPath, "export default function webAccess() {}\\n");
+      const childExtension = { path: extensionPath, fingerprint: fingerprintExtension(extensionPath) };
+      const resolved = resolveExplicitLoadout(
+        { extensions: [], mcpServers: [], subagentOnlyExtensions: [childExtension], tools: ["web_search"] },
+        [],
+        [],
+      );
+      assert.deepEqual(resolved.subagentOnlyExtensions, [childExtension]);
+      assert.deepEqual(resolved.toolProviders, [
+        { name: "web_search", provider: "subagent-only-extension", runnerManaged: true },
+      ]);
+      const snapshot = createExplicitLoadoutSnapshot(resolved, "1.4.0", [], []);
+      validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" });
+      writeFileSync(extensionPath, "export default function changedWebAccess() {}\\n");
+      assert.throws(
+        () => validateExplicitLoadoutSnapshot(snapshot, { runtimeVersion: "1.4.0" }),
+        /Subagent-only extension changed/,
+      );
+    });
   });
 
   it("fingerprints safe MCP configuration without persisting secret values", () => {
@@ -1986,6 +2075,33 @@ describe("subagent discovery", () => {
     assert.equal(policy.authorize({ toolName: "read", parentToolCallId: "codemode/2" })?.block, true);
   });
 
+  it("binds explicitly granted child-only extension tools to their loaded provider", () => {
+    const extensionPath = "/child/extensions/web-access.ts";
+    const actual = { name: "web_search", provider: extensionPath, contractFingerprint: testContract };
+    let pinned: readonly any[] = [];
+    const policy = createToolPolicyHandlers(
+      [{ name: "web_search", provider: "subagent-only-extension", runnerManaged: true }],
+      () => [actual],
+      (grants) => {
+        pinned = grants;
+      },
+      undefined,
+      undefined,
+      undefined,
+      [extensionPath],
+    );
+    const error = policy.start({
+      shutdown() {
+        assert.fail("selected child extension should be accepted");
+      },
+    });
+    assert.equal(error, undefined);
+    assert.equal(pinned[0]?.provider, extensionPath);
+    assert.equal(pinned[0]?.contractFingerprint, testContract);
+    assert.deepEqual(policy.handleInput(), { action: "continue" });
+    assert.equal(policy.authorize({ toolName: "web_search" }), undefined);
+  });
+
   it("signals readiness only when the validated initial input is allowed", () => {
     const provider = { name: "read", provider: "builtin:read", contractFingerprint: testContract };
     let readinessSignals = 0;
@@ -2192,6 +2308,34 @@ describe("subagent discovery", () => {
         ),
       /changed provider or contract/,
     );
+  });
+
+  it("applySandboxToParts replays child-only extension paths with their pinned contents", () => {
+    withTempDir((dir) => {
+      const extensionPath = join(dir, "child-search.ts");
+      writeFileSync(extensionPath, "export default function childSearch() {}\\n");
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "researcher",
+          toolAllowlist: "read,web_search,ask_question",
+          subagentOnlyExtensions: [{ path: extensionPath, fingerprint: testApi.fingerprintExtension(extensionPath) }],
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: false,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: dir, name: "researcher" },
+      );
+      assert.ok(parts.includes("--no-extensions"));
+      assert.ok(parts.includes("-e"));
+      assert.ok(parts.includes(`'${extensionPath}'`));
+    });
   });
 
   it("applySandboxToParts explicitly loads codemode and disables MCP in strict mode", () => {
