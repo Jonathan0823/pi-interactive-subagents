@@ -1512,7 +1512,12 @@ describe("subagent discovery", () => {
             { extensions: [], mcpServers: ["selected"], tools: [name] },
             [],
             [
-              { name: "mcp__selected__read", provider: "builtin:mcp", mcpServer: "selected", contractFingerprint: testContract },
+              {
+                name: "mcp__selected__read",
+                provider: "builtin:mcp",
+                mcpServer: "selected",
+                contractFingerprint: testContract,
+              },
               { name, provider: "builtin:mcp", contractFingerprint: testContract },
             ],
             [{ name: "selected", fingerprint: "a".repeat(64) }],
@@ -1642,7 +1647,10 @@ describe("subagent discovery", () => {
       mkdirSync(agentDir, { recursive: true });
       writeFileSync(join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: { selected: { command: "node" } } }));
       writeFileSync(join(cwd, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { selected: { command: "node" } } }));
-      assert.throws(() => resolveMcpServerIdentities(["selected"], { agentDir, cwd }), /ambiguous configuration sources/);
+      assert.throws(
+        () => resolveMcpServerIdentities(["selected"], { agentDir, cwd }),
+        /ambiguous configuration sources/,
+      );
     });
   });
 
@@ -1650,7 +1658,14 @@ describe("subagent discovery", () => {
     const mcpParts: string[] = [];
     appendExplicitLoadoutArgs(
       mcpParts,
-      { version: 1, runtimeVersion: "1.4.0", extensions: [], mcpServers: ["selected"], toolProviders: [], runnerFiles: [] },
+      {
+        version: 1,
+        runtimeVersion: "1.4.0",
+        extensions: [],
+        mcpServers: ["selected"],
+        toolProviders: [],
+        runnerFiles: [],
+      },
       "mcp__selected__read",
       "/policy.ts",
       shellEscape,
@@ -1993,9 +2008,14 @@ describe("subagent discovery", () => {
       mcpServer: "selected",
       contractFingerprint: testContract,
     };
-    let providers: typeof grant[] = [];
+    let providers: (typeof grant)[] = [];
     let readinessSignals = 0;
-    const policy = createToolPolicyHandlers([grant], () => providers, undefined, () => readinessSignals++);
+    const policy = createToolPolicyHandlers(
+      [grant],
+      () => providers,
+      undefined,
+      () => readinessSignals++,
+    );
 
     const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
     process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS = String(Date.now() + 5_000);

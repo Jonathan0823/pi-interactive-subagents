@@ -317,7 +317,9 @@ export function validateExplicitLoadoutSnapshot(
     for (const expected of mcpFingerprints) {
       const matches = context.currentMcpServers.filter((server) => server.name === expected.name);
       if (matches.length !== 1 || matches[0].fingerprint !== expected.fingerprint) {
-        throw new Error(`MCP server "${expected.name}" changed configuration identity; a fresh subagent spawn is required.`);
+        throw new Error(
+          `MCP server "${expected.name}" changed configuration identity; a fresh subagent spawn is required.`,
+        );
       }
     }
   }

@@ -73,11 +73,7 @@ function checkedArgs(name: string, value: unknown): string[] {
  * OAuth, URL credentials, query strings, and fragments are deliberately omitted; only env/header
  * key names and public OAuth settings participate. The returned digest is the only persisted value.
  */
-export function fingerprintMcpServerConfig(
-  name: string,
-  rawConfig: unknown,
-  workingDirectory = process.cwd(),
-): string {
+export function fingerprintMcpServerConfig(name: string, rawConfig: unknown, workingDirectory = process.cwd()): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(name) || !isRecord(rawConfig)) {
     throw new Error(`MCP server "${name}" has an invalid configuration identity.`);
   }
@@ -162,7 +158,11 @@ export function fingerprintMcpServerConfig(
     description: config.description ?? null,
     toolExposure: config.toolExposure ?? {},
     envKeys: isRecord(config.env) ? Object.keys(config.env).sort() : [],
-    headerKeys: isRecord(config.headers) ? Object.keys(config.headers).map((key) => key.toLowerCase()).sort() : [],
+    headerKeys: isRecord(config.headers)
+      ? Object.keys(config.headers)
+          .map((key) => key.toLowerCase())
+          .sort()
+      : [],
   };
 
   if (command !== undefined) {
@@ -192,19 +192,11 @@ export function fingerprintMcpServerConfig(
     };
     const oauth = isRecord(config.oauth) ? config.oauth : {};
     identity.oauth = Object.fromEntries(
-      [
-        "clientId",
-        "callbackPort",
-        "callbackUrl",
-        "scope",
-        "clientName",
-        "clientRegistration",
-        "authServerMetadataUrl",
-      ]
+      ["clientId", "callbackPort", "callbackUrl", "scope", "clientName", "clientRegistration", "authServerMetadataUrl"]
         .filter((key) => oauth[key] !== undefined)
         .map((key) => [key, oauth[key]]),
     );
-    identity.authProvider = isRecord(config.auth) ? config.auth.provider ?? null : null;
+    identity.authProvider = isRecord(config.auth) ? (config.auth.provider ?? null) : null;
   }
 
   return createHash("sha256").update(stableSerialize(identity)).digest("hex");
@@ -248,8 +240,7 @@ export function resolveMcpServerIdentities(
     const collisions = [
       ...sources.flatMap((source) => Object.keys(source.servers)),
       ...(options.registeredServers ?? []).map((server) => server.name),
-    ]
-      .filter((candidate) => candidate !== name && normalizedServerName(candidate) === normalizedServerName(name));
+    ].filter((candidate) => candidate !== name && normalizedServerName(candidate) === normalizedServerName(name));
     if (collisions.length > 0) {
       throw new Error(`MCP server "${name}" has an ambiguous normalized identity with "${collisions[0]}".`);
     }

@@ -42,7 +42,9 @@ function runShell(command: string, env: Record<string, string>, timeoutMs: numbe
 }
 
 describe("explicit MCP grants in the real Pi CLI", () => {
-  it("enforces direct and codemode grants across configured servers and rejects MCP config drift on resume", { timeout: 60_000 }, async () => {
+  it("enforces direct and codemode grants across configured servers and rejects MCP config drift on resume", {
+    timeout: 60_000,
+  }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-mcp-loadout-cli-"));
     const agentDir = join(dir, "agent-config");
     mkdirSync(agentDir, { recursive: true });
@@ -149,7 +151,11 @@ describe("explicit MCP grants in the real Pi CLI", () => {
         join(agentDir, "mcp.json"),
         JSON.stringify({
           mcpServers: {
-            selected: { command: process.execPath, args: [mcpServerPath, "selected", selectedCallsPath], exposure: "direct" },
+            selected: {
+              command: process.execPath,
+              args: [mcpServerPath, "selected", selectedCallsPath],
+              exposure: "direct",
+            },
             other: { command: process.execPath, args: [mcpServerPath, "other", otherCallsPath], exposure: "direct" },
           },
         }),
@@ -189,7 +195,10 @@ describe("explicit MCP grants in the real Pi CLI", () => {
       assert.ok(existsSync(metadataPath), `MCP provider metadata was not captured:\n${probe.stderr}`);
       const availableTools = JSON.parse(readFileSync(metadataPath, "utf8"));
       assert.deepEqual(
-        availableTools.filter((tool: any) => tool.provider === "builtin:mcp").map((tool: any) => [tool.name, tool.mcpServer]).sort(),
+        availableTools
+          .filter((tool: any) => tool.provider === "builtin:mcp")
+          .map((tool: any) => [tool.name, tool.mcpServer])
+          .sort(),
         [
           ["mcp__other__other", "other"],
           ["mcp__selected__granted", "selected"],
@@ -209,7 +218,12 @@ describe("explicit MCP grants in the real Pi CLI", () => {
         serverIdentities,
       );
       const policyPath = join(dir, "loadout.json");
-      const policy = createExplicitLoadoutSnapshot(resolved, "1.4.0", [], [TOOL_POLICY, LOADOUT_MODULE, MCP_IDENTITY_MODULE]);
+      const policy = createExplicitLoadoutSnapshot(
+        resolved,
+        "1.4.0",
+        [],
+        [TOOL_POLICY, LOADOUT_MODULE, MCP_IDENTITY_MODULE],
+      );
       writeFileSync(policyPath, JSON.stringify({ explicitLoadout: policy }), { mode: 0o600 });
       assert.doesNotMatch(readFileSync(policyPath, "utf8"), /fixture-only|first-secret|second-secret/);
 
@@ -285,7 +299,10 @@ describe("explicit MCP grants in the real Pi CLI", () => {
       const nestedReadyPath = join(dir, "nested-ready");
       const nestedCommand = command
         .replace(shellEscape(sessionPath), shellEscape(nestedSessionPath))
-        .replace(shellEscape("Try the granted direct MCP tool and then two ungranted tools."), shellEscape("Use codemode for MCP calls."));
+        .replace(
+          shellEscape("Try the granted direct MCP tool and then two ungranted tools."),
+          shellEscape("Use codemode for MCP calls."),
+        );
       const nestedResult = await runShell(
         buildStartupDeadlineCommand({
           command: nestedCommand,
