@@ -87,6 +87,7 @@ describe("explicit loadout Pi CLI smoke", () => {
           `    writeFileSync(${JSON.stringify(policyPath)}, JSON.stringify({ explicitLoadout: { version: 1, toolProviders } }), { mode: 0o600 });\n` +
           `    ctx.shutdown();\n` +
           `  });\n` +
+          `  pi.on("input", () => ({ action: "handled" }));\n` +
           `}\n`,
         "utf8",
       );
