@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import type { McpServerIdentity } from "./mcp-identity.ts";
+
+export interface ChildOnlyExtension {
+  path: string;
+  fingerprint: string;
+}
 
 export interface ExplicitLoadoutProfile {
   /** Presence of either resource field opts into strict mode. */
   extensions?: string[];
   mcpServers?: string[];
+  subagentOnlyExtensions?: ChildOnlyExtension[];
   tools?: string[];
 }
 
@@ -29,6 +35,7 @@ export interface ResolvedToolProvider {
 
 export interface ResolvedExplicitLoadout {
   extensions: RegisteredSubagentExtension[];
+  subagentOnlyExtensions: ChildOnlyExtension[];
   mcpServers: string[];
   mcpServerFingerprints: McpServerIdentity[];
   toolProviders: ResolvedToolProvider[];
@@ -38,6 +45,7 @@ export interface ExplicitSubagentLoadout {
   version: 1;
   runtimeVersion: string;
   extensions: RegisteredSubagentExtension[];
+  subagentOnlyExtensions?: ChildOnlyExtension[];
   mcpServers: string[];
   /** Allowlisted non-secret configuration fingerprints; never contains credentials. */
   mcpServerFingerprints?: McpServerIdentity[];
@@ -46,6 +54,7 @@ export interface ExplicitSubagentLoadout {
 }
 
 const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "powershell", "grep", "find", "ls"]);
+export const CHILD_ONLY_EXTENSION_PROVIDER = "subagent-only-extension";
 
 export function fingerprintExtension(path: string): string {
   if (!statSync(path).isFile()) throw new Error(`Registered extension "${path}" is not a file.`);
@@ -121,6 +130,7 @@ export function createExplicitLoadoutSnapshot(
     version: 1,
     runtimeVersion,
     extensions: resolved.extensions,
+    subagentOnlyExtensions: resolved.subagentOnlyExtensions,
     mcpServers: resolved.mcpServers,
     ...(resolved.mcpServerFingerprints.length > 0 ? { mcpServerFingerprints: resolved.mcpServerFingerprints } : {}),
     toolProviders: [...providers.values()],
@@ -141,6 +151,12 @@ export function appendExplicitLoadoutArgs(
   parts.push("--tools", escape(toolAllowlist ?? "ask_question"));
   const extensionPaths = new Set(loadout.extensions.map((extension) => extension.path));
   for (const extension of loadout.extensions) parts.push("-e", escape(extension.path));
+  for (const extension of loadout.subagentOnlyExtensions ?? []) {
+    if (!extensionPaths.has(extension.path)) {
+      extensionPaths.add(extension.path);
+      parts.push("-e", escape(extension.path));
+    }
+  }
   const spawningToolNames = new Set(["subagent", "subagent_message", "subagents_list"]);
   for (const grant of loadout.toolProviders) {
     if (grant.runnerManaged && spawningToolNames.has(grant.name) && !extensionPaths.has(grant.provider)) {
@@ -157,6 +173,75 @@ const GENERIC_MCP_TOOLS = new Set([
   "read_mcp_resource",
   "tool_search",
 ]);
+
+function normalizeMcpName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+/** Expand `mcp:server` and `mcp:server/tool` profile selectors into exact runtime tool names. */
+export function expandMcpToolSelectors(
+  requestedTools: readonly string[],
+  availableTools: readonly ResolvedToolProvider[],
+): { tools: string[]; servers: string[] } {
+  const tools: string[] = [];
+  const servers: string[] = [];
+  const seenTools = new Set<string>();
+  const seenServers = new Set<string>();
+
+  const addTool = (name: string) => {
+    if (!seenTools.has(name)) {
+      seenTools.add(name);
+      tools.push(name);
+    }
+  };
+
+  for (const requested of requestedTools) {
+    if (!requested.startsWith("mcp:")) {
+      addTool(requested);
+      continue;
+    }
+
+    const selector = requested.slice("mcp:".length);
+    const slash = selector.indexOf("/");
+    const serverRef = slash < 0 ? selector : selector.slice(0, slash);
+    const toolRef = slash < 0 ? undefined : selector.slice(slash + 1);
+    if (!serverRef || (toolRef !== undefined && !toolRef)) {
+      throw new Error(`Invalid MCP tool selector "${requested}".`);
+    }
+
+    const serverCandidates = [
+      ...new Set(
+        availableTools
+          .filter((tool) => tool.provider === "builtin:mcp" && tool.mcpServer)
+          .map((tool) => tool.mcpServer as string)
+          .filter((name) => normalizeMcpName(name) === normalizeMcpName(serverRef)),
+      ),
+    ];
+    if (serverCandidates.length !== 1) {
+      throw new Error(`MCP server selector "${serverRef}" is not available or has an ambiguous identity.`);
+    }
+    const server = serverCandidates[0];
+    if (!seenServers.has(server)) {
+      seenServers.add(server);
+      servers.push(server);
+    }
+
+    const prefix = `mcp__${normalizeMcpName(server)}__`;
+    const candidates = availableTools.filter(
+      (tool) => tool.provider === "builtin:mcp" && tool.mcpServer === server && tool.name.startsWith(prefix),
+    );
+    const matches =
+      toolRef === undefined
+        ? candidates
+        : candidates.filter((tool) => tool.name === `${prefix}${normalizeMcpName(toolRef)}`);
+    if (matches.length === 0) {
+      throw new Error(`MCP tool selector "${requested}" is not available.`);
+    }
+    for (const match of matches) addTool(match.name);
+  }
+
+  return { tools, servers };
+}
 
 /** Resolve an explicitly opted-in profile without allowing it to inherit tools or resources. */
 export function resolveExplicitLoadout(
@@ -181,6 +266,23 @@ export function resolveExplicitLoadout(
     }
     return { ...identities[0] };
   });
+
+  const subagentOnlyExtensions = profile.subagentOnlyExtensions ?? [];
+  const childExtensionPaths = new Set<string>();
+  for (const extension of subagentOnlyExtensions) {
+    if (!extension.path || !isAbsolute(extension.path)) {
+      throw new Error("Subagent-only extension paths must be resolved absolute paths.");
+    }
+    if (childExtensionPaths.has(extension.path))
+      throw new Error(`Duplicate subagent-only extension path "${extension.path}".`);
+    childExtensionPaths.add(extension.path);
+    if (
+      !/^[a-f0-9]{64}$/.test(extension.fingerprint) ||
+      fingerprintExtension(extension.path) !== extension.fingerprint
+    ) {
+      throw new Error(`Subagent-only extension identity is invalid or changed: ${extension.path}`);
+    }
+  }
 
   const extensions = (profile.extensions ?? []).map((name) => {
     if (!name || name.trim() !== name || name.includes(",") || /[*?]/.test(name)) {
@@ -229,7 +331,13 @@ export function resolveExplicitLoadout(
     toolNames.add(name);
 
     const matches = availableTools.filter((tool) => tool.name === name);
-    if (matches.length === 0) throw new Error(`Tool grant "${name}" is not available in the parent runtime.`);
+    if (matches.length === 0) {
+      if (subagentOnlyExtensions.length > 0 && !name.startsWith("mcp__") && !GENERIC_MCP_TOOLS.has(name)) {
+        toolProviders.push({ name, provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true });
+        continue;
+      }
+      throw new Error(`Tool grant "${name}" is not available in the parent runtime.`);
+    }
     if (matches.length !== 1) throw new Error(`Tool grant "${name}" has ambiguous providers.`);
 
     const tool = matches[0];
@@ -247,7 +355,9 @@ export function resolveExplicitLoadout(
         throw new Error(`MCP tool "${name}" has an unexpected provider identity.`);
       }
       const isCoreBuiltin = BUILTIN_TOOLS.has(name) && tool.provider === `builtin:${name}`;
-      const selectedProvider = extensions.some((extension) => extension.path === tool.provider);
+      const selectedProvider =
+        extensions.some((extension) => extension.path === tool.provider) ||
+        subagentOnlyExtensions.some((extension) => extension.path === tool.provider);
       if (!isCoreBuiltin && !selectedProvider) {
         throw new Error(`Tool grant "${name}" is not provided by an explicitly selected resource.`);
       }
@@ -260,7 +370,7 @@ export function resolveExplicitLoadout(
     });
   }
 
-  return { extensions, mcpServers, mcpServerFingerprints, toolProviders };
+  return { extensions, subagentOnlyExtensions, mcpServers, mcpServerFingerprints, toolProviders };
 }
 
 export interface ExplicitLoadoutValidationContext {
@@ -276,6 +386,7 @@ export function validateExplicitLoadoutSnapshot(
     version: number;
     runtimeVersion: string;
     extensions: readonly RegisteredSubagentExtension[];
+    subagentOnlyExtensions?: readonly ChildOnlyExtension[];
     mcpServers: readonly string[];
     mcpServerFingerprints?: readonly McpServerIdentity[];
     toolProviders: readonly ResolvedToolProvider[];
@@ -288,11 +399,37 @@ export function validateExplicitLoadoutSnapshot(
   if (snapshot.version !== 1) throw new Error("Unsupported explicit subagent loadout snapshot version.");
   if (
     !Array.isArray(snapshot.extensions) ||
+    !Array.isArray(snapshot.subagentOnlyExtensions ?? []) ||
     !Array.isArray(snapshot.mcpServers) ||
     snapshot.mcpServers.some((name) => typeof name !== "string" || !/^[a-zA-Z0-9_-]+$/.test(name)) ||
     new Set(snapshot.mcpServers).size !== snapshot.mcpServers.length
   ) {
     throw new Error("Invalid explicit subagent loadout resources.");
+  }
+  const childExtensions = snapshot.subagentOnlyExtensions ?? [];
+  if (
+    childExtensions.some(
+      (extension) =>
+        !extension ||
+        typeof extension.path !== "string" ||
+        !isAbsolute(extension.path) ||
+        typeof extension.fingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/.test(extension.fingerprint),
+    ) ||
+    new Set(childExtensions.map((extension) => extension.path)).size !== childExtensions.length
+  ) {
+    throw new Error("Explicit subagent loadout has invalid child-only extension identities.");
+  }
+  for (const extension of childExtensions) {
+    let currentFingerprint: string;
+    try {
+      currentFingerprint = fingerprintExtension(extension.path);
+    } catch {
+      throw new Error(`Subagent-only extension is unavailable; a fresh spawn is required: ${extension.path}`);
+    }
+    if (currentFingerprint !== extension.fingerprint) {
+      throw new Error(`Subagent-only extension changed; a fresh spawn is required: ${extension.path}`);
+    }
   }
   const mcpFingerprints = snapshot.mcpServerFingerprints ?? [];
   if (

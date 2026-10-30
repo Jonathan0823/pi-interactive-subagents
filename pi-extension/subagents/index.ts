@@ -70,9 +70,12 @@ import { resolveMcpServerIdentities, type McpServerIdentity } from "./mcp-identi
 import {
   appendExplicitLoadoutArgs,
   createExplicitLoadoutSnapshot,
+  expandMcpToolSelectors,
+  fingerprintExtension,
   snapshotToolProviders,
   resolveExplicitLoadout,
   validateExplicitLoadoutSnapshot,
+  type ChildOnlyExtension,
   type ExplicitLoadoutProfile,
   type RegisteredSubagentExtension,
   type ResolvedToolProvider,
@@ -175,6 +178,7 @@ interface AgentDefaults {
   fallbackModel?: "pi-default";
   tools?: string;
   extensions?: string[];
+  subagentOnlyExtensions?: string[];
   mcpServers?: string[];
   explicitLoadout?: boolean;
   skills?: string;
@@ -385,12 +389,28 @@ function parseOptionalBoolean(value: string | undefined): boolean | undefined {
 }
 
 function getFrontmatterList(frontmatter: string, key: string): string[] | undefined {
-  const match = frontmatter.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
-  if (!match) return undefined;
-  return match[1]
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const lines = frontmatter.split("\n");
+  const index = lines.findIndex((line) => new RegExp(`^${key}:[ \\t]*`).test(line));
+  if (index < 0) return undefined;
+  const inline = lines[index].replace(new RegExp(`^${key}:[ \\t]*`), "").trim();
+  if (inline)
+    return inline
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const items: string[] = [];
+  for (const line of lines.slice(index + 1)) {
+    const item = line.match(/^\s+-\s+(.+?)\s*$/);
+    if (item) {
+      items.push(item[1].replace(/^['"]|['"]$/g, ""));
+      continue;
+    }
+    if (!line.trim()) continue;
+    if (/^\s/.test(line)) break;
+    break;
+  }
+  return items;
 }
 
 /** Parse a comma-separated frontmatter value into a trimmed list (or undefined). */
@@ -401,6 +421,20 @@ function parseCommaList(value: string | undefined): string[] | undefined {
     .map((s) => s.trim())
     .filter(Boolean);
   return list.length > 0 ? list : undefined;
+}
+
+function resolveSubagentOnlyExtensions(paths: readonly string[] = [], cwd = process.cwd()): ChildOnlyExtension[] {
+  const seen = new Set<string>();
+  return paths.map((configuredPath) => {
+    const expandedPath = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
+    const path = resolve(cwd, expandedPath);
+    if (seen.has(path)) throw new Error(`Duplicate subagent-only extension path "${configuredPath}".`);
+    seen.add(path);
+    if (!existsSync(path) || !statSync(path).isFile()) {
+      throw new Error(`Subagent-only extension "${configuredPath}" does not resolve to a file from ${cwd}.`);
+    }
+    return { path, fingerprint: fingerprintExtension(path) };
+  });
 }
 
 function parseSessionMode(value: string | undefined): SubagentSessionMode | undefined {
@@ -425,8 +459,11 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     fallbackModel: getFrontmatterValue(frontmatter, "fallback-model") === "pi-default" ? "pi-default" : undefined,
     tools: getFrontmatterValue(frontmatter, "tools"),
     extensions: getFrontmatterList(frontmatter, "extensions"),
+    subagentOnlyExtensions: getFrontmatterList(frontmatter, "subagentOnlyExtensions"),
     mcpServers: getFrontmatterList(frontmatter, "mcp_servers"),
-    explicitLoadout: /^\s*(?:extensions|mcp_servers):/m.test(frontmatter),
+    explicitLoadout:
+      /^\s*(?:extensions|mcp_servers):/m.test(frontmatter) ||
+      (getFrontmatterValue(frontmatter, "tools") ?? "").split(",").some((tool) => tool.trim().startsWith("mcp:")),
     systemPromptMode: systemPromptMode === "replace" ? "replace" : systemPromptMode === "append" ? "append" : undefined,
     skills: getFrontmatterValue(frontmatter, "skill") ?? getFrontmatterValue(frontmatter, "skills"),
     thinking: getFrontmatterValue(frontmatter, "thinking"),
@@ -1325,6 +1362,7 @@ function applySandboxToParts(
   // Default-deny: disable global extension discovery and re-enable only the
   // extensions backing the whitelisted tools. A null allowlist means the spawn
   // was intentionally unrestricted (e.g. a fork clone) and is replayed as-is.
+  const loadedExtensionPaths = new Set<string>();
   if (loadout.explicitLoadout) {
     validateExplicitLoadoutSnapshot(loadout.explicitLoadout, {
       runtimeVersion: opts.runtimeVersion ?? getPiRuntimeVersion(),
@@ -1339,6 +1377,12 @@ function applySandboxToParts(
       join(SUBAGENTS_DIR, "tool-policy.ts"),
       shellEscape,
     );
+    for (const extension of loadout.explicitLoadout.extensions) {
+      if (!extension.path.startsWith("builtin:")) loadedExtensionPaths.add(extension.path);
+    }
+    for (const extension of loadout.explicitLoadout.subagentOnlyExtensions ?? []) {
+      loadedExtensionPaths.add(extension.path);
+    }
   } else if (loadout.toolAllowlist) {
     parts.push("--no-extensions");
     parts.push("--tools", shellEscape(loadout.toolAllowlist));
@@ -1350,6 +1394,17 @@ function applySandboxToParts(
     }
     for (const extPath of extPaths) {
       parts.push("-e", shellEscape(extPath));
+      loadedExtensionPaths.add(extPath);
+    }
+  }
+
+  for (const extension of loadout.subagentOnlyExtensions ?? []) {
+    if (fingerprintExtension(extension.path) !== extension.fingerprint) {
+      throw new Error(`Subagent-only extension changed since this loadout was saved: ${extension.path}`);
+    }
+    if (!loadedExtensionPaths.has(extension.path)) {
+      parts.push("-e", shellEscape(extension.path));
+      loadedExtensionPaths.add(extension.path);
     }
   }
 }
@@ -1618,6 +1673,9 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
+  fingerprintExtension,
+  resolveSubagentOnlyExtensions,
+  expandMcpToolSelectors,
   applySandboxToParts,
   buildPiPromptArgs,
   ScrollableModelPicker,
@@ -1693,8 +1751,21 @@ async function launchSubagent(
   const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const grantSpawning = !!(agentDefs?.subagentAgents && agentDefs.subagentAgents.length > 0);
+  const subagentOnlyExtensions = resolveSubagentOnlyExtensions(agentDefs?.subagentOnlyExtensions, targetCwdForSession);
+  const requestedTools = (effectiveTools ?? "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+  const runtimeToolProviders =
+    agentDefs?.explicitLoadout && !options?.explicitLoadout ? getRuntimeToolProviders(latestPi) : [];
+  const mcpToolSelection =
+    agentDefs?.explicitLoadout && !options?.explicitLoadout
+      ? expandMcpToolSelectors(requestedTools, runtimeToolProviders)
+      : { tools: requestedTools, servers: [] };
   let explicitLoadout: SubagentLoadout["explicitLoadout"] = options?.explicitLoadout;
-  const selectedMcpServers = explicitLoadout?.mcpServers ?? agentDefs?.mcpServers ?? [];
+  const selectedMcpServers = explicitLoadout?.mcpServers ?? [
+    ...new Set([...(agentDefs?.mcpServers ?? []), ...mcpToolSelection.servers]),
+  ];
   const mcpServerIdentities = resolveMcpServerIdentities(selectedMcpServers, {
     agentDir: effectiveAgentDir,
     cwd: targetCwdForSession,
@@ -1705,14 +1776,12 @@ async function launchSubagent(
     const resolved = resolveExplicitLoadout(
       {
         extensions: agentDefs.extensions,
-        mcpServers: agentDefs.mcpServers,
-        tools: (effectiveTools ?? "")
-          .split(",")
-          .map((tool) => tool.trim())
-          .filter(Boolean),
+        subagentOnlyExtensions,
+        mcpServers: selectedMcpServers,
+        tools: mcpToolSelection.tools,
       } satisfies ExplicitLoadoutProfile,
       getRegisteredSubagentExtensions(latestPi),
-      getRuntimeToolProviders(latestPi),
+      runtimeToolProviders,
       mcpServerIdentities,
     );
     if (
@@ -1896,7 +1965,9 @@ async function launchSubagent(
   // spawning toolset), we disable global extension discovery and re-enable only
   // the extensions backing the whitelisted tools. Bare/fork spawns with no tool
   // restriction keep their full default toolset and all global extensions.
-  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, { grantSpawning });
+  const effectiveToolsForChild =
+    agentDefs?.explicitLoadout && !options?.explicitLoadout ? mcpToolSelection.tools.join(",") : effectiveTools;
+  const toolAllowlist = buildSubagentToolAllowlist(effectiveToolsForChild, { grantSpawning });
 
   // Snapshot the fully-resolved sandbox beside the session file so a later
   // `subagent_message({ name })` resume can replay the exact same
@@ -1906,6 +1977,7 @@ async function launchSubagent(
     modelSource,
     toolAllowlist,
     explicitLoadout,
+    subagentOnlyExtensions,
     model: effectiveModel ?? null,
     thinking: effectiveThinking ?? null,
     systemPromptMode: systemPromptMode ?? null,

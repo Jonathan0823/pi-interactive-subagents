@@ -4,7 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createExplicitLoadoutSnapshot, resolveExplicitLoadout } from "../../pi-extension/subagents/loadout.ts";
+import {
+  createExplicitLoadoutSnapshot,
+  fingerprintExtension,
+  resolveExplicitLoadout,
+} from "../../pi-extension/subagents/loadout.ts";
 import { buildStartupDeadlineCommand } from "../../pi-extension/subagents/startup.ts";
 import { shellEscape } from "../../pi-extension/subagents/tmux.ts";
 import { describe, it } from "node:test";
@@ -554,16 +558,15 @@ describe("explicit loadout Pi CLI smoke", () => {
         `import { writeFileSync } from "node:fs";\n` +
           `import { fingerprintToolContract } from ${JSON.stringify(LOADOUT_MODULE)};\n` +
           `export default function(pi: any) { pi.on("session_start", (_event: unknown, ctx: any) => {\n` +
-          `  const tools = pi.getAllTools().filter((candidate: any) => ["fixture_echo", "fixture_ungranted", "codemode"].includes(candidate.name));\n` +
-          `  if (tools.length !== 3) throw new Error("Expected both fixture tools and codemode in Pi.");\n` +
+          `  const tools = pi.getAllTools().filter((candidate: any) => candidate.name === "codemode");\n` +
+          `  if (tools.length !== 1) throw new Error("Expected codemode in Pi.");\n` +
           `  writeFileSync(${JSON.stringify(metadataPath)}, JSON.stringify(tools.map((tool: any) => ({ name: tool.name, provider: tool.sourceInfo?.path, contractFingerprint: fingerprintToolContract({ name: tool.name, description: tool.description ?? "", parameters: tool.parameters }) }))));\n` +
           `  ctx.shutdown();\n` +
           `}); }\n`,
         "utf8",
       );
       const probeCommand = [
-        "exec pi --no-session --no-extensions --no-mcp --tools fixture_echo,fixture_ungranted,codemode",
-        `-e ${shellEscape(fixturePath)}`,
+        "exec pi --no-session --no-extensions --no-mcp --tools codemode",
         `-e ${shellEscape("builtin:codemode")}`,
         `-e ${shellEscape(metadataProbePath)}`,
         "--model openai/probe --print",
@@ -588,11 +591,12 @@ describe("explicit loadout Pi CLI smoke", () => {
       ];
       const availableTools = JSON.parse(readFileSync(metadataPath, "utf8"));
       const resolved = resolveExplicitLoadout(
-        { extensions: ["fixture", "builtin:codemode"], tools: ["fixture_echo", "codemode"] },
-        [
-          { name: "fixture", path: fixturePath, identity: "fixture-tool@1" },
-          { name: "builtin:codemode", path: "builtin:codemode" },
-        ],
+        {
+          extensions: ["builtin:codemode"],
+          subagentOnlyExtensions: [{ path: fixturePath, fingerprint: fingerprintExtension(fixturePath) }],
+          tools: ["fixture_echo", "codemode"],
+        },
+        [{ name: "builtin:codemode", path: "builtin:codemode" }],
         availableTools,
       );
       const policyPath = join(dir, "loadout.json");
@@ -600,7 +604,7 @@ describe("explicit loadout Pi CLI smoke", () => {
         resolved,
         versionResult.stdout.trim(),
         [],
-        [TOOL_POLICY, LOADOUT_MODULE, SUBAGENT_DONE],
+        [TOOL_POLICY, LOADOUT_MODULE, SUBAGENT_DONE, fixturePath],
       );
       writeFileSync(policyPath, JSON.stringify({ explicitLoadout: policy }));
 

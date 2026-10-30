@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
@@ -19,6 +19,29 @@ const PROJECT_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TOOL_POLICY = join(PROJECT_ROOT, "pi-extension/subagents/tool-policy.ts");
 const LOADOUT_MODULE = join(PROJECT_ROOT, "pi-extension/subagents/loadout.ts");
 const MCP_IDENTITY_MODULE = join(PROJECT_ROOT, "pi-extension/subagents/mcp-identity.ts");
+
+function getCodemodeEntryPoint(version: string): string | undefined {
+  const agentDirs = [...new Set([process.env.PI_CODING_AGENT_DIR, join(homedir(), ".pi", "agent")].filter(Boolean))];
+  const packageRoots = ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"];
+  for (const agentDir of agentDirs) {
+    for (const packageRoot of packageRoots) {
+      const path = join(
+        agentDir as string,
+        "install",
+        "releases",
+        version,
+        "node_modules",
+        packageRoot,
+        "dist",
+        "extensions",
+        "codemode",
+        "index.js",
+      );
+      if (existsSync(path)) return path;
+    }
+  }
+  return undefined;
+}
 
 type ScenarioCall = { id: string; name: string; arguments: Record<string, unknown> };
 
@@ -44,7 +67,16 @@ function runShell(command: string, env: Record<string, string>, timeoutMs: numbe
 describe("explicit MCP grants in the real Pi CLI", () => {
   it("enforces direct and codemode grants across configured servers and rejects MCP config drift on resume", {
     timeout: 60_000,
-  }, async () => {
+  }, async (context) => {
+    const versionResult = spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(versionResult.status, 0, versionResult.stderr);
+    const runtimeVersion = versionResult.stdout.match(/\d+\.\d+\.\d+/)?.[0];
+    const codemodePath = runtimeVersion ? getCodemodeEntryPoint(runtimeVersion) : undefined;
+    if (!codemodePath) {
+      context.skip("The installed Pi CLI codemode entrypoint is unavailable for an isolated MCP config.");
+      return;
+    }
+
     const dir = mkdtempSync(join(tmpdir(), "pi-mcp-loadout-cli-"));
     const agentDir = join(dir, "agent-config");
     mkdirSync(agentDir, { recursive: true });
@@ -183,7 +215,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
           "exec pi --no-session --no-extensions",
           `--tools ${shellEscape("codemode,mcp__selected__granted,mcp__selected__ungranted,mcp__other__other")}`,
           `-e ${shellEscape("builtin:mcp")}`,
-          `-e ${shellEscape("builtin:codemode")}`,
+          `-e ${shellEscape(codemodePath)}`,
           `-e ${shellEscape(probePath)}`,
           "--model openai/probe --print",
           shellEscape("probe MCP providers"),
@@ -205,24 +237,24 @@ describe("explicit MCP grants in the real Pi CLI", () => {
           ["mcp__selected__ungranted", "selected"],
         ],
       );
-      assert.ok(availableTools.some((tool: any) => tool.name === "codemode" && tool.provider === "builtin:codemode"));
+      assert.ok(availableTools.some((tool: any) => tool.name === "codemode" && tool.provider === codemodePath));
 
       const serverIdentities = resolveMcpServerIdentities(["selected"], {
         agentDir,
         cwd: process.cwd(),
       });
       const resolved = resolveExplicitLoadout(
-        { extensions: ["builtin:codemode"], mcpServers: ["selected"], tools: ["codemode", "mcp__selected__granted"] },
-        [{ name: "builtin:codemode", path: "builtin:codemode", identity: "builtin:codemode" }],
+        { extensions: ["codemode"], mcpServers: ["selected"], tools: ["codemode", "mcp__selected__granted"] },
+        [{ name: "codemode", path: codemodePath, identity: `codemode@${runtimeVersion}` }],
         availableTools,
         serverIdentities,
       );
       const policyPath = join(dir, "loadout.json");
       const policy = createExplicitLoadoutSnapshot(
         resolved,
-        "1.4.0",
+        runtimeVersion as string,
         [],
-        [TOOL_POLICY, LOADOUT_MODULE, MCP_IDENTITY_MODULE],
+        [TOOL_POLICY, LOADOUT_MODULE, MCP_IDENTITY_MODULE, codemodePath],
       );
       writeFileSync(policyPath, JSON.stringify({ explicitLoadout: policy }), { mode: 0o600 });
       assert.doesNotMatch(readFileSync(policyPath, "utf8"), /fixture-only|first-secret|second-secret/);
@@ -241,7 +273,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
         "--no-extensions",
         `--tools ${shellEscape("codemode,mcp__selected__granted,mcp__selected__ungranted,mcp__other__other")}`,
         `-e ${shellEscape("builtin:mcp")}`,
-        `-e ${shellEscape("builtin:codemode")}`,
+        `-e ${shellEscape(codemodePath)}`,
         `-e ${shellEscape(TOOL_POLICY)}`,
         "--model openai/probe --print",
         shellEscape("Try the granted direct MCP tool and then two ungranted tools."),
@@ -341,7 +373,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
           "--no-extensions",
           `--tools ${shellEscape("codemode,mcp__selected__granted,mcp__selected__ungranted,mcp__other__other")}`,
           `-e ${shellEscape("builtin:mcp")}`,
-          `-e ${shellEscape("builtin:codemode")}`,
+          `-e ${shellEscape(codemodePath)}`,
           `-e ${shellEscape(TOOL_POLICY)}`,
           "--model openai/probe --print",
           shellEscape("Resume and try another MCP call."),
@@ -379,7 +411,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
           "--no-extensions",
           `--tools ${shellEscape("codemode,mcp__selected__granted,mcp__selected__ungranted,mcp__other__other")}`,
           `-e ${shellEscape("builtin:mcp")}`,
-          `-e ${shellEscape("builtin:codemode")}`,
+          `-e ${shellEscape(codemodePath)}`,
           `-e ${shellEscape(TOOL_POLICY)}`,
           "--model openai/probe --print",
           shellEscape("Resume and try another MCP call."),
