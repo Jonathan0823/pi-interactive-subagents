@@ -58,10 +58,12 @@ function checkedArgs(name: string, value: unknown): string[] {
   const secretFlag = /(?:token|secret|password|api[-_]?key|authorization|credential)/i;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (secretFlag.test(arg) || /\bBearer\s+\S+/i.test(arg) || /^[A-Za-z0-9_+/=-]{40,}$/.test(arg)) {
-      throw new Error(`MCP server "${name}" has secret-like arguments that cannot be safely fingerprinted.`);
-    }
-    if (arg.startsWith("--") && i + 1 < args.length && secretFlag.test(arg)) {
+    const looksLikePath = arg.startsWith("/") || arg.startsWith("./") || arg.startsWith("../");
+    if (
+      secretFlag.test(arg) ||
+      /\bBearer\s+\S+/i.test(arg) ||
+      (!looksLikePath && /^[A-Za-z0-9_+/=-]{40,}$/.test(arg))
+    ) {
       throw new Error(`MCP server "${name}" has secret-like arguments that cannot be safely fingerprinted.`);
     }
   }

@@ -1580,18 +1580,44 @@ describe("subagent discovery", () => {
     assert.equal(providers[0].mcpServer, "selected-server");
     assert.equal(providers[0].provider, "builtin:mcp");
     assert.match(providers[0].contractFingerprint ?? "", /^[a-f0-9]{64}$/);
+    const ambiguous = snapshotToolProviders([
+      {
+        name: "mcp__selected_server__read",
+        description: "Read a value.",
+        parameters: { type: "object" },
+        sourceInfo: { path: "builtin:mcp" },
+        namespace: { aliases: ["selected-server", "selected_server"] },
+      },
+    ]);
+    assert.equal(ambiguous[0].mcpServer, undefined);
     assert.throws(
       () =>
-        snapshotToolProviders([
-          {
-            name: "mcp__selected_server__read",
-            description: "Read a value.",
-            parameters: { type: "object" },
-            sourceInfo: { path: "builtin:mcp" },
-            namespace: { aliases: ["selected-server", "selected_server"] },
-          },
-        ]),
-      /unambiguous MCP server identity/,
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: [], tools: ["mcp__selected_server__read"] },
+          [],
+          ambiguous,
+        ),
+      /not provided by an explicitly selected resource/,
+    );
+
+    const foreignProvider = snapshotToolProviders([
+      {
+        name: "mcp__selected_server__read",
+        description: "Read a value.",
+        parameters: { type: "object" },
+        sourceInfo: { path: "/extensions/other.ts" },
+        namespace: { aliases: ["selected-server"] },
+      },
+    ]);
+    assert.equal(foreignProvider[0].mcpServer, undefined);
+    assert.throws(
+      () =>
+        resolveExplicitLoadout(
+          { extensions: [], mcpServers: [], tools: ["mcp__selected_server__read"] },
+          [],
+          foreignProvider,
+        ),
+      /unexpected provider identity/,
     );
   });
 
@@ -1627,10 +1653,24 @@ describe("subagent discovery", () => {
     assert.equal(first, rotatedCredential, "secret values are excluded from the safe configuration identity");
     assert.notEqual(first, changedConfig, "non-secret server arguments are pinned");
     assert.notEqual(first, changedWorkingDirectory, "the effective stdio working directory is pinned");
+    const filesystemPath = "/Users/someone/Documents/work/client-projects";
+    const filesystemIdentity = fingerprintMcpServerConfig("filesystem", {
+      command: "node",
+      args: ["server.mjs", filesystemPath],
+    });
+    const otherFilesystemIdentity = fingerprintMcpServerConfig("filesystem", {
+      command: "node",
+      args: ["server.mjs", "/Users/someone/Documents/work/other-project"],
+    });
+    assert.notEqual(filesystemIdentity, otherFilesystemIdentity, "filesystem paths are safely pinned");
     assert.match(first, /^[a-f0-9]{64}$/);
     assert.doesNotMatch(first, /first-secret|second-secret/);
     assert.throws(
       () => fingerprintMcpServerConfig("selected", { command: "node", args: ["--api-key", "secret"] }),
+      /secret-like arguments/,
+    );
+    assert.throws(
+      () => fingerprintMcpServerConfig("selected", { command: "node", args: ["x".repeat(48)] }),
       /secret-like arguments/,
     );
     assert.throws(

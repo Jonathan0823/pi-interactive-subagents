@@ -86,10 +86,8 @@ export function snapshotToolProviders(tools: readonly any[]): ResolvedToolProvid
               typeof alias === "string" && tool.name.startsWith(`mcp__${alias.replace(/[^a-zA-Z0-9_]/g, "_")}__`),
           )
         : [];
-      if (provider !== "builtin:mcp" || matches.length !== 1) {
-        throw new Error(`Pi did not report an unambiguous MCP server identity for tool "${tool.name}".`);
-      }
-      mcpServer = matches[0];
+      // Leave unidentified MCP tools unbound; explicit grant resolution rejects them.
+      if (provider === "builtin:mcp" && matches.length === 1) mcpServer = matches[0];
     }
     return {
       name: tool.name,
