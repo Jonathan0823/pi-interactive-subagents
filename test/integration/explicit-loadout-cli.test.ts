@@ -110,8 +110,10 @@ describe("explicit loadout Pi CLI smoke", () => {
         "smoke",
       ]);
       assert.equal(probe.status, 0, `Tool metadata probe failed:\n${probe.stdout}\n${probe.stderr}`);
-      const snapshot = JSON.parse(readFileSync(policyPath, "utf8"));
-      assert.deepEqual(snapshot.explicitLoadout.toolProviders.map((tool: any) => [tool.name, tool.provider]).sort(), [
+      const snapshot: { explicitLoadout: { toolProviders: Array<{ name: string; provider: string }> } } = JSON.parse(
+        readFileSync(policyPath, "utf8"),
+      );
+      assert.deepEqual(snapshot.explicitLoadout.toolProviders.map((tool) => [tool.name, tool.provider]).sort(), [
         ["codemode", "builtin:codemode"],
         ["read", "builtin:read"],
       ]);
@@ -504,7 +506,7 @@ describe("explicit loadout Pi CLI smoke", () => {
     if (!majorMinor || Number(majorMinor[1]) < 1 || (Number(majorMinor[1]) === 1 && Number(majorMinor[2]) < 4)) return;
 
     const dir = mkdtempSync(join(tmpdir(), "pi-loadout-grant-cli-"));
-    const requests: Record<string, any>[] = [];
+    const requests: Record<string, unknown>[] = [];
     let scenarioCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> | undefined;
     const server = createServer((request, response) => {
       if (request.method !== "POST" || !request.url?.includes("chat/completions")) {

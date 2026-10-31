@@ -1,3 +1,4 @@
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ interface ExplicitLoadoutPolicy {
   toolProviders: ResolvedToolProvider[];
 }
 
-function currentProviders(pi: any): ResolvedToolProvider[] {
+function currentProviders(pi: Pick<ExtensionAPI, "getAllTools">): ResolvedToolProvider[] {
   if (typeof pi.getAllTools !== "function") {
     throw new TypeError("This Pi runtime does not expose the tool metadata required for strict subagent permissions.");
   }
@@ -276,7 +277,7 @@ export function createToolPolicyHandlers(...args: ToolPolicyHandlerArguments) {
   };
 }
 
-export default function subagentToolPolicy(pi: any): void {
+export default function subagentToolPolicy(pi: ExtensionAPI): void {
   const policyPath = process.env.PI_SUBAGENT_LOADOUT_FILE;
   if (!policyPath) return;
 
@@ -354,7 +355,7 @@ export default function subagentToolPolicy(pi: any): void {
       writeReadinessState(readinessPath, "pending");
     },
   );
-  pi.on("session_start", (_event: unknown, ctx: any) => {
+  pi.on("session_start", (_event, ctx: ExtensionContext) => {
     const error = handlers.start({ shutdown: () => ctx.shutdown() });
     if (error) {
       console.error(`Explicit subagent loadout rejected before tool use: ${error}`);
@@ -377,7 +378,7 @@ export default function subagentToolPolicy(pi: any): void {
       }
     }
   });
-  pi.on("before_agent_start", (_event: unknown, ctx: any) =>
+  pi.on("before_agent_start", (_event, ctx: ExtensionContext) =>
     handlers.beforeAgentStart({ shutdown: () => ctx.shutdown() }).then((error) => {
       if (!error) return;
       console.error(`Explicit subagent loadout rejected before model use: ${error}`);
@@ -399,7 +400,7 @@ export default function subagentToolPolicy(pi: any): void {
       }
     }),
   );
-  pi.on("input", (_event: unknown, ctx: any) => {
+  pi.on("input", (_event, ctx: ExtensionContext) => {
     const result = handlers.handleInput({ shutdown: () => ctx.shutdown() });
     if (result.action === "handled") {
       const reason = handlers.failureReason() ?? "startup validation failed.";

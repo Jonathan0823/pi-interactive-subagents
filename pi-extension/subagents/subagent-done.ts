@@ -12,7 +12,7 @@
  * (auto-exit is suppressed for that turn via `awaitingAnswer`), and the parent
  * replies with subagent_message — which lands as the subagent's next turn.
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -50,7 +50,7 @@ export function writeSubagentShutdownRequest(sessionFile: string, requestedAt = 
  * standalone session), so those agents auto-exit exactly as before.
  */
 export function runningChildrenCount(): number {
-  const fn = (globalThis as any)[Symbol.for("pi-subagents/running-children-count")];
+  const fn = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents/running-children-count")];
   if (typeof fn !== "function") return 0;
   try {
     const n = fn();
@@ -60,7 +60,17 @@ export function runningChildrenCount(): number {
   }
 }
 
-export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[] | undefined): boolean {
+interface AssistantMessageSummary {
+  role?: string;
+  stopReason?: string;
+  errorMessage?: unknown;
+}
+
+function isAssistantMessageSummary(value: unknown): value is AssistantMessageSummary {
+  return typeof value === "object" && value !== null && "role" in value && value.role === "assistant";
+}
+
+export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: readonly unknown[] | undefined): boolean {
   // Manual input should not strand an auto-exit subagent. If the latest agent
   // turn completed normally, close the session. Escape/abort still leaves it
   // open for inspection or another prompt.
@@ -71,7 +81,7 @@ export function shouldAutoExitOnAgentEnd(_userTookOver: boolean, messages: any[]
   // error, not a clean completion.
   if (messages) {
     for (const msg of messages.toReversed()) {
-      if (msg?.role === "assistant") {
+      if (isAssistantMessageSummary(msg)) {
         return msg.stopReason !== "aborted";
       }
     }
@@ -94,10 +104,10 @@ export interface SubagentErrorInfo {
  * Returns `null` when the latest assistant turn completed normally or was
  * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
  */
-export function findLatestAssistantError(messages: any[] | undefined): SubagentErrorInfo | null {
+export function findLatestAssistantError(messages: readonly unknown[] | undefined): SubagentErrorInfo | null {
   if (!messages) return null;
   for (const msg of messages.toReversed()) {
-    if (msg?.role !== "assistant") continue;
+    if (!isAssistantMessageSummary(msg)) continue;
     if (msg.stopReason !== "error") return null;
     const raw = typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
     return {
@@ -130,10 +140,10 @@ export default function subagentDone(pi: ExtensionAPI) {
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
   });
 
-  function renderWidget(ctx: { ui: { setWidget: (...args: any[]) => void } }, _theme: any) {
+  function renderWidget(ctx: ExtensionContext) {
     ctx.ui.setWidget(
       "subagent-tools",
-      (_tui: any, theme: any) => {
+      (_tui, theme) => {
         const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
 
         const label = subagentAgent || subagentName;
@@ -193,7 +203,7 @@ export default function subagentDone(pi: ExtensionAPI) {
       });
     denied = parseDeniedTools(deniedToolsValue);
 
-    renderWidget(ctx, null);
+    renderWidget(ctx);
   });
 
   pi.on("input", () => {
@@ -239,7 +249,7 @@ export default function subagentDone(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (event, ctx) => {
-    const messages = (event as any).messages as any[] | undefined;
+    const messages = event.messages;
     // Never shut down while this session still has work in flight:
     //  - awaitingAnswer: an ask_question is pending the orchestrator's reply.
     //  - runningChildrenCount(): this subagent spawned its own children and is
@@ -296,11 +306,11 @@ export default function subagentDone(pi: ExtensionAPI) {
   });
 
   pi.on("turn_start", (event) => {
-    recorder.turnStart((event as any).turnIndex);
+    recorder.turnStart(event.turnIndex);
   });
 
   pi.on("turn_end", (event) => {
-    recorder.turnEnd((event as any).turnIndex);
+    recorder.turnEnd(event.turnIndex);
   });
 
   pi.on("before_provider_request", () => {
@@ -312,31 +322,31 @@ export default function subagentDone(pi: ExtensionAPI) {
   });
 
   pi.on("message_update", (event) => {
-    recorder.messageUpdate((event as any).assistantMessageEvent?.type);
+    recorder.messageUpdate(event.assistantMessageEvent?.type);
   });
 
   pi.on("tool_execution_start", (event) => {
-    recorder.toolExecutionStart((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionStart(event.toolCallId, event.toolName);
   });
 
   pi.on("tool_call", (event) => {
-    recorder.toolCall((event as any).toolCallId, (event as any).toolName);
+    recorder.toolCall(event.toolCallId, event.toolName);
   });
 
   pi.on("tool_execution_update", (event) => {
-    recorder.toolExecutionUpdate((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionUpdate(event.toolCallId, event.toolName);
   });
 
   pi.on("tool_result", (event) => {
-    recorder.toolResult((event as any).toolCallId, (event as any).toolName);
+    recorder.toolResult(event.toolCallId, event.toolName);
   });
 
   pi.on("tool_execution_end", (event) => {
-    recorder.toolExecutionEnd((event as any).toolCallId, (event as any).toolName);
+    recorder.toolExecutionEnd(event.toolCallId, event.toolName);
   });
 
   pi.on("session_shutdown", (event) => {
-    recorder.sessionShutdown((event as any).reason);
+    recorder.sessionShutdown(event.reason);
   });
 
   // Toggle expand/collapse with Ctrl+Alt+O
@@ -344,7 +354,7 @@ export default function subagentDone(pi: ExtensionAPI) {
     description: "Toggle subagent tools widget",
     handler: (ctx) => {
       expanded = !expanded;
-      renderWidget(ctx, null);
+      renderWidget(ctx);
     },
   });
 
@@ -409,7 +419,8 @@ export default function subagentDone(pi: ExtensionAPI) {
 
     renderCall(args, theme) {
       const text =
-        theme.fg("toolTitle", theme.bold("ask_question ")) + theme.fg("muted", String((args as any).question ?? ""));
+        theme.fg("toolTitle", theme.bold("ask_question ")) +
+        theme.fg("muted", String((args as { question?: unknown }).question ?? ""));
       return new Text(text, 0, 0);
     },
   });

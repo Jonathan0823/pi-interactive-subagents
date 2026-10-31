@@ -6,11 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  createExplicitLoadoutSnapshot,
-  resolveExplicitLoadout,
-  snapshotToolProviders,
-} from "../../pi-extension/subagents/loadout.ts";
+import { createExplicitLoadoutSnapshot, resolveExplicitLoadout } from "../../pi-extension/subagents/loadout.ts";
 import { resolveMcpServerIdentities } from "../../pi-extension/subagents/mcp-identity.ts";
 import { buildStartupDeadlineCommand } from "../../pi-extension/subagents/startup.ts";
 import { shellEscape } from "../../pi-extension/subagents/tmux.ts";
@@ -81,7 +77,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
     const agentDir = join(dir, "agent-config");
     mkdirSync(agentDir, { recursive: true });
 
-    const requests: Record<string, any>[] = [];
+    const requests: Record<string, unknown>[] = [];
     let scenarioCalls: ScenarioCall[] = [];
     const modelServer = createServer((request, response) => {
       if (request.method !== "POST" || !request.url?.includes("chat/completions")) {
@@ -225,11 +221,13 @@ describe("explicit MCP grants in the real Pi CLI", () => {
       );
       assert.equal(probe.status, 0, `MCP metadata probe failed:\n${probe.stdout}\n${probe.stderr}`);
       assert.ok(existsSync(metadataPath), `MCP provider metadata was not captured:\n${probe.stderr}`);
-      const availableTools = JSON.parse(readFileSync(metadataPath, "utf8"));
+      const availableTools: Array<{ name: string; provider: string; mcpServer?: string }> = JSON.parse(
+        readFileSync(metadataPath, "utf8"),
+      );
       assert.deepEqual(
         availableTools
-          .filter((tool: any) => tool.provider === "builtin:mcp")
-          .map((tool: any) => [tool.name, tool.mcpServer])
+          .filter((tool) => tool.provider === "builtin:mcp")
+          .map((tool) => [tool.name, tool.mcpServer])
           .sort(),
         [
           ["mcp__other__other", "other"],
@@ -237,7 +235,7 @@ describe("explicit MCP grants in the real Pi CLI", () => {
           ["mcp__selected__ungranted", "selected"],
         ],
       );
-      assert.ok(availableTools.some((tool: any) => tool.name === "codemode" && tool.provider === codemodePath));
+      assert.ok(availableTools.some((tool) => tool.name === "codemode" && tool.provider === codemodePath));
 
       const serverIdentities = resolveMcpServerIdentities(["selected"], {
         agentDir,

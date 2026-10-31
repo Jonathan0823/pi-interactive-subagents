@@ -19,6 +19,11 @@ function assert(condition: boolean, msg: string) {
   }
 }
 
+function assertDefined<T>(value: T | null | undefined): T {
+  if (value == null) throw new Error("Expected test fixture to be defined");
+  return value;
+}
+
 // --- Extracted logic under test ---
 
 function parseFrontmatter(content: string) {
@@ -87,17 +92,17 @@ Body here.`;
 // --- Test 1: Frontmatter parsing ---
 console.log("\n🧪 Frontmatter parsing of system-prompt field");
 
-const r1 = parseFrontmatter(AGENT_REPLACE)!;
+const r1 = assertDefined(parseFrontmatter(AGENT_REPLACE));
 assert(r1.systemPromptMode === "replace", "system-prompt: replace → mode is 'replace'");
 assert(r1.body === "You are a specialized agent.", "body extracted correctly");
 
-const r2 = parseFrontmatter(AGENT_APPEND)!;
+const r2 = assertDefined(parseFrontmatter(AGENT_APPEND));
 assert(r2.systemPromptMode === "append", "system-prompt: append → mode is 'append'");
 
-const r3 = parseFrontmatter(AGENT_DEFAULT)!;
+const r3 = assertDefined(parseFrontmatter(AGENT_DEFAULT));
 assert(r3.systemPromptMode === undefined, "no system-prompt field → mode is undefined");
 
-const r4 = parseFrontmatter(AGENT_INVALID)!;
+const r4 = assertDefined(parseFrontmatter(AGENT_INVALID));
 assert(r4.systemPromptMode === undefined, "system-prompt: foobar → mode is undefined (ignored)");
 
 // --- Test 2: Identity routing ---
@@ -144,14 +149,14 @@ function loadFromDir(name: string) {
   return parseFrontmatter(readFileSync(p, "utf8"));
 }
 
-const t1 = loadFromDir("test-replace")!;
+const t1 = assertDefined(loadFromDir("test-replace"));
 assert(t1.systemPromptMode === "replace", "file test-replace.md → replace mode");
 assert(t1.body === "You are a specialized agent.", "file test-replace.md → body correct");
 
-const t2 = loadFromDir("test-append")!;
+const t2 = assertDefined(loadFromDir("test-append"));
 assert(t2.systemPromptMode === "append", "file test-append.md → append mode");
 
-const t3 = loadFromDir("test-default")!;
+const t3 = assertDefined(loadFromDir("test-default"));
 assert(t3.systemPromptMode === undefined, "file test-default.md → no mode");
 
 rmSync(tmpDir, { recursive: true });
