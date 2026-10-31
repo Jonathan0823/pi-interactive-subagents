@@ -79,8 +79,16 @@ export function fingerprintToolContract(tool: { name: string; description: strin
   return createHash("sha256").update(contract).digest("hex");
 }
 
+interface RuntimeToolSnapshot {
+  name: string;
+  description?: unknown;
+  parameters?: unknown;
+  sourceInfo?: { path?: unknown };
+  namespace?: { aliases?: unknown };
+}
+
 /** Snapshot runtime tools consistently in the parent and child policy. */
-export function snapshotToolProviders(tools: readonly any[]): ResolvedToolProvider[] {
+export function snapshotToolProviders(tools: readonly RuntimeToolSnapshot[]): ResolvedToolProvider[] {
   return tools.map((tool) => {
     const source = tool.sourceInfo?.path;
     if (typeof source !== "string" || !source) {
@@ -144,29 +152,29 @@ export function appendExplicitLoadoutArgs(
   loadout: ExplicitSubagentLoadout,
   toolAllowlist: string | null,
   policyExtensionPath: string,
-  escape: (value: string) => string,
+  escapeArgument: (value: string) => string,
 ): void {
   parts.push("--no-extensions");
   if (loadout.mcpServers.length === 0) parts.push("--no-mcp");
-  else parts.push("-e", escape("builtin:mcp"));
-  parts.push("--tools", escape(toolAllowlist ?? "ask_question"));
+  else parts.push("-e", escapeArgument("builtin:mcp"));
+  parts.push("--tools", escapeArgument(toolAllowlist ?? "ask_question"));
   const extensionPaths = new Set(loadout.extensions.map((extension) => extension.path));
-  for (const extension of loadout.extensions) parts.push("-e", escape(extension.path));
+  for (const extension of loadout.extensions) parts.push("-e", escapeArgument(extension.path));
   for (const extension of loadout.subagentOnlyExtensions ?? []) {
     if (!extensionPaths.has(extension.path)) {
       extensionPaths.add(extension.path);
-      parts.push("-e", escape(extension.path));
+      parts.push("-e", escapeArgument(extension.path));
     }
   }
   const spawningToolNames = new Set(["subagent", "subagent_message", "subagents_list"]);
   for (const grant of loadout.toolProviders) {
     if (grant.runnerManaged && spawningToolNames.has(grant.name) && !extensionPaths.has(grant.provider)) {
       extensionPaths.add(grant.provider);
-      parts.push("-e", escape(grant.provider));
+      parts.push("-e", escapeArgument(grant.provider));
     }
   }
   // Load policy last so its before_agent_start validation follows async tool registration by selected extensions.
-  parts.push("-e", escape(policyExtensionPath));
+  parts.push("-e", escapeArgument(policyExtensionPath));
 }
 
 const GENERIC_MCP_TOOLS = new Set([

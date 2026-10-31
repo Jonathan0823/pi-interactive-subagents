@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme, KeybindingsManager } from "@mariozechner/pi-coding-agent";
+import type { TUI, Component } from "@mariozechner/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -29,6 +31,7 @@ import {
   mergeNewEntries,
   seedSubagentSessionFile,
   summarizeSessionStats,
+  type SessionEntry,
 } from "../pi-extension/subagents/session.ts";
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
@@ -99,9 +102,17 @@ function withTempDir(run: (dir: string) => void) {
 
 function chooseFromCustomModelPicker(index: number | number[] = 0) {
   let callIndex = 0;
-  return async (factory: any, options?: { overlay?: boolean }) => {
+  return async <T>(
+    factory: (
+      tui: TUI,
+      theme: Theme,
+      keybindings: KeybindingsManager,
+      done: (result: T) => void,
+    ) => Component & { handleInput(data: string): void },
+    options?: { overlay?: boolean },
+  ): Promise<T | undefined> => {
     assert.notEqual(options?.overlay, true, "the model picker should replace the input, not open as an overlay");
-    let selected: string | undefined;
+    let selected: T | undefined;
     const actions: Record<string, string> = {
       "tui.select.up": "UP",
       "tui.select.down": "DOWN",
@@ -109,10 +120,10 @@ function chooseFromCustomModelPicker(index: number | number[] = 0) {
       "tui.select.cancel": "ESC",
     };
     const component = factory(
-      { requestRender() {} },
-      { fg: (_color: string, text: string) => text },
-      { matches: (data: string, action: string) => data === actions[action] },
-      (value: string | undefined) => {
+      { requestRender() {} } as TUI,
+      { fg: (_color: string, text: string) => text } as Theme,
+      { matches: (data: string, action: string) => data === actions[action] } as KeybindingsManager,
+      (value: T) => {
         selected = value;
       },
     );
@@ -125,12 +136,173 @@ function chooseFromCustomModelPicker(index: number | number[] = 0) {
   };
 }
 
+type RunningSubagent = typeof subagentsModule.__test__.runningSubagents extends Map<string, infer T> ? T : never;
+type ResolvedToolProvider = Parameters<typeof createToolPolicyHandlers>[0][number];
+type RegisteredTool = Parameters<ExtensionAPI["registerTool"]>[0];
+type TestAgent = ReturnType<typeof subagentsModule.__test__.discoverAgentDefinitions>[number];
+type TestToolResult = {
+  content: Array<{ type: string; text?: string }>;
+  details?: { agents?: TestAgent[]; error?: string; [key: string]: unknown };
+};
+type TestToolParameter = { description?: string; type?: string };
+type TestRegisteredTool = {
+  name: string;
+  description: string;
+  parameters: { properties: Record<string, TestToolParameter>; required?: string[] };
+  execute(
+    toolCallId?: string,
+    params?: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: (...args: unknown[]) => void,
+    context?: Partial<Pick<ExtensionContext, "cwd">> & { shutdown?(): void },
+  ): Promise<TestToolResult> | TestToolResult;
+  renderCall?: (params: Record<string, unknown>, theme: Theme) => Component;
+};
+type RegisteredToolResult = TestToolResult;
+
+function adaptRegisteredTool(tool: RegisteredTool): TestRegisteredTool {
+  return tool as unknown as TestRegisteredTool;
+}
+
+function adaptRegisteredCommand(name: string, options: RegisteredCommandOptions): TestRegisteredCommand {
+  return { name, ...options } as unknown as TestRegisteredCommand;
+}
+
+function findRegisteredCommand(commands: TestRegisteredCommand[], name: string): TestRegisteredCommand {
+  const command = commands.find((candidate) => candidate.name === name);
+  if (!command) throw new Error(`Expected /${name} to be registered`);
+  return command;
+}
+
+type TestModelLike = {
+  id: string;
+  provider?: string;
+  name?: string;
+  contextWindow?: number;
+  reasoning?: boolean;
+};
+type TestHelpers = Omit<
+  typeof subagentsModule.__test__,
+  "preferredModelId" | "modelPickerItems" | "thinkingLevelsForModel" | "thinkingPickerItems"
+> & {
+  preferredModelId(agentModel: string | undefined, currentModel: TestModelLike | undefined): string | undefined;
+  modelPickerItems(
+    models: TestModelLike[],
+    preferredModel?: string,
+  ): ReturnType<typeof subagentsModule.__test__.modelPickerItems>;
+  thinkingLevelsForModel(
+    model?: TestModelLike,
+    xhighSupport?: Parameters<typeof subagentsModule.__test__.thinkingLevelsForModel>[1],
+  ): ReturnType<typeof subagentsModule.__test__.thinkingLevelsForModel>;
+  thinkingPickerItems(
+    model: TestModelLike | undefined,
+    savedThinking?: string,
+  ): ReturnType<typeof subagentsModule.__test__.thinkingPickerItems>;
+};
+const testHelpers = subagentsModule.__test__ as unknown as TestHelpers;
+
+function findRegisteredTool(tools: TestRegisteredTool[], name: string): TestRegisteredTool {
+  const tool = tools.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`Expected ${name} to be registered`);
+  return tool;
+}
+
+async function executeRegisteredTool(
+  tool: TestRegisteredTool,
+  params?: Record<string, unknown>,
+  context?: Partial<Pick<ExtensionContext, "cwd">> & { shutdown?(): void },
+): Promise<RegisteredToolResult> {
+  if (params === undefined && context === undefined) return tool.execute();
+  return tool.execute("test-tool-call", params ?? {}, undefined, undefined, context);
+}
+
+function assertResolvedRunning(
+  result: ReturnType<typeof subagentsModule.__test__.resolveRunningByName>,
+): asserts result is { running: RunningSubagent } {
+  if (!("running" in result)) throw new Error(result.error);
+}
+
+function assertToolError(
+  result: ReturnType<typeof subagentsModule.__test__.steerSubagent>,
+): asserts result is { error: string } {
+  if (!("error" in result)) throw new Error("Expected an error result");
+}
+
+function assertResolveError(
+  result: ReturnType<typeof subagentsModule.__test__.resolveRunningByName>,
+): asserts result is { error: string } {
+  if (!("error" in result)) throw new Error("Expected name resolution error");
+}
+
+function getRunning(running: Map<string, RunningSubagent>, id: string): RunningSubagent {
+  const entry = running.get(id);
+  if (!entry) throw new Error(`Missing running subagent ${id}`);
+  return entry;
+}
+
+function textFromToolResult(result: RegisteredToolResult): string {
+  const item = result.content.find((content) => content.type === "text");
+  if (!item || !("text" in item) || typeof item.text !== "string") {
+    throw new Error("Expected tool result to contain text");
+  }
+  return item.text;
+}
+
+function agentsFromToolResult(result: RegisteredToolResult): TestAgent[] {
+  if (!result.details || typeof result.details !== "object" || !("agents" in result.details)) {
+    throw new Error("Expected tool result to contain agents");
+  }
+  const agents = result.details.agents;
+  if (!Array.isArray(agents)) throw new Error("Expected agents to be an array");
+  return agents.filter(
+    (agent): agent is TestAgent =>
+      typeof agent === "object" && agent !== null && "name" in agent && typeof agent.name === "string",
+  );
+}
+type RegisteredCommandOptions = Parameters<ExtensionAPI["registerCommand"]>[1];
+type TestModel = { provider: string; id: string; name: string; contextWindow: number; reasoning?: boolean };
+type TestCommandContext = {
+  cwd?: string;
+  mode?: string;
+  model?: TestModel;
+  modelRegistry?: { getAvailable(): TestModel[] };
+  ui: {
+    custom?: ReturnType<typeof chooseFromCustomModelPicker>;
+    select?: (title: string, options: string[]) => Promise<string | undefined>;
+    input?: (title: string) => Promise<string | undefined>;
+    notify?: (message: string, level?: "error" | "info" | "warning") => void;
+  };
+};
+type TestRegisteredCommand = {
+  name: string;
+  description?: string;
+  handler(args: string, context: TestCommandContext): Promise<void>;
+};
+type RegisteredMessageRenderer = Parameters<ExtensionAPI["registerMessageRenderer"]>[1];
+type TestTheme = {
+  fg(color: string, text: string): string;
+  bg(color: string, text: string): string;
+  bold(text: string): string;
+};
+type TestMessageRenderer = (
+  message: {
+    role?: string;
+    display?: boolean;
+    timestamp?: number;
+    customType: string;
+    content: string;
+    details?: unknown;
+  },
+  options: { expanded: boolean },
+  theme: TestTheme,
+) => Component | undefined;
+
 function createMockExtensionApi() {
-  const registeredTools: Array<any> = [];
-  const registeredCommands: Array<any> = [];
-  const registeredMessageRenderers: Array<any> = [];
+  const registeredTools: TestRegisteredTool[] = [];
+  const registeredCommands: TestRegisteredCommand[] = [];
+  const registeredMessageRenderers: Array<{ name: string; renderer: TestMessageRenderer }> = [];
   const sentUserMessages: string[] = [];
-  const sentMessages: Array<any> = [];
+  const sentMessages: Array<unknown> = [];
   return {
     registeredTools,
     registeredCommands,
@@ -139,27 +311,35 @@ function createMockExtensionApi() {
     sentMessages,
     api: {
       on() {},
-      registerTool(tool: any) {
-        registeredTools.push(tool);
+      registerTool(tool: RegisteredTool) {
+        registeredTools.push(adaptRegisteredTool(tool));
       },
-      registerCommand(name: string, command: any) {
-        registeredCommands.push({ name, ...command });
+      registerCommand(name: string, command: RegisteredCommandOptions) {
+        registeredCommands.push(adaptRegisteredCommand(name, command));
       },
-      registerMessageRenderer(name: string, renderer: any) {
-        registeredMessageRenderers.push({ name, renderer });
+      registerMessageRenderer(name: string, renderer: RegisteredMessageRenderer) {
+        registeredMessageRenderers.push({ name, renderer: renderer as unknown as TestMessageRenderer });
       },
       registerShortcut() {},
       sendUserMessage(message: string) {
         sentUserMessages.push(message);
       },
-      sendMessage(message: any, options?: any) {
+      sendMessage(
+        message: Parameters<ExtensionAPI["sendMessage"]>[0],
+        options?: Parameters<ExtensionAPI["sendMessage"]>[1],
+      ) {
         sentMessages.push({ message, options });
       },
       getAllTools() {
         return [];
       },
-    } as any,
+    } as unknown as ExtensionAPI,
   };
+}
+
+function deniedToolCallReason(result: ReturnType<typeof authorizeToolCall>): string {
+  if (result.allowed) throw new Error("expected tool call to be denied");
+  return result.reason;
 }
 
 function restoreEnvVar(name: string, value: string | undefined) {
@@ -419,7 +599,7 @@ describe("session.ts", () => {
       assert.deepEqual(Object.keys(reg).sort(), ["scout", "scout-2"]);
       // Overwrite scout with a new session file.
       registerName(adir, "scout", { sessionFile: "/s/scout-new.jsonl", sessionId: "id-scout-new" });
-      assert.equal(resolveNameInRegistry(adir, "scout")!.sessionFile, "/s/scout-new.jsonl");
+      assert.equal(resolveNameInRegistry(adir, "scout")?.sessionFile, "/s/scout-new.jsonl");
     });
 
     it("returns null for unknown names and {} for a missing/corrupt registry", () => {
@@ -434,25 +614,25 @@ describe("session.ts", () => {
 
   describe("findLastAssistantMessage", () => {
     it("finds last assistant text", () => {
-      const entries = [USER_MSG, ASSISTANT_MSG, ASSISTANT_MSG_2] as any[];
+      const entries: SessionEntry[] = [USER_MSG, ASSISTANT_MSG, ASSISTANT_MSG_2];
       const text = findLastAssistantMessage(entries);
       assert.equal(text, "Updated plan with details.");
     });
 
     it("skips thinking blocks, gets text only", () => {
-      const entries = [ASSISTANT_MSG_2] as any[];
+      const entries: SessionEntry[] = [ASSISTANT_MSG_2];
       const text = findLastAssistantMessage(entries);
       assert.equal(text, "Updated plan with details.");
     });
 
     it("skips tool results", () => {
-      const entries = [ASSISTANT_MSG, TOOL_RESULT] as any[];
+      const entries: SessionEntry[] = [ASSISTANT_MSG, TOOL_RESULT];
       const text = findLastAssistantMessage(entries);
       assert.equal(text, "Here is my plan...");
     });
 
     it("returns null when no assistant messages", () => {
-      const entries = [USER_MSG] as any[];
+      const entries: SessionEntry[] = [USER_MSG];
       assert.equal(findLastAssistantMessage(entries), null);
     });
 
@@ -463,6 +643,7 @@ describe("session.ts", () => {
     it("skips empty assistant messages and returns real content above", () => {
       const realMsg = {
         type: "message",
+        id: "real-message",
         message: {
           role: "assistant",
           content: [{ type: "text", text: "Real summary content." }],
@@ -470,12 +651,13 @@ describe("session.ts", () => {
       };
       const emptyMsg = {
         type: "message",
+        id: "empty-message",
         message: {
           role: "assistant",
           content: [],
         },
       };
-      const entries = [realMsg, emptyMsg] as any[];
+      const entries: SessionEntry[] = [realMsg, emptyMsg];
       assert.equal(findLastAssistantMessage(entries), "Real summary content.");
     });
 
@@ -486,6 +668,7 @@ describe("session.ts", () => {
       // the orchestrator would believe the subagent completed.
       const earlierGood = {
         type: "message",
+        id: "earlier-good",
         message: {
           role: "assistant",
           content: [{ type: "text", text: "Investigating the bug..." }],
@@ -493,6 +676,7 @@ describe("session.ts", () => {
       };
       const overloadError = {
         type: "message",
+        id: "overload-error",
         message: {
           role: "assistant",
           content: [],
@@ -500,7 +684,7 @@ describe("session.ts", () => {
           errorMessage: "Anthropic 529 Overloaded after 3 retries",
         },
       };
-      const entries = [earlierGood, overloadError] as any[];
+      const entries: SessionEntry[] = [earlierGood, overloadError];
       assert.equal(findLastAssistantMessage(entries), "Subagent error: Anthropic 529 Overloaded after 3 retries");
     });
 
@@ -509,6 +693,7 @@ describe("session.ts", () => {
       // prefer the actual content over the synthetic error fallback.
       const msg = {
         type: "message",
+        id: "partial-output",
         message: {
           role: "assistant",
           content: [{ type: "text", text: "Here is partial output." }],
@@ -516,19 +701,20 @@ describe("session.ts", () => {
           errorMessage: "stream interrupted",
         },
       };
-      assert.equal(findLastAssistantMessage([msg] as any[]), "Here is partial output.");
+      assert.equal(findLastAssistantMessage([msg]), "Here is partial output.");
     });
 
     it("does not invent a summary for a stop=error message with no errorMessage", () => {
       const msg = {
         type: "message",
+        id: "empty-error",
         message: {
           role: "assistant",
           content: [],
           stopReason: "error",
         },
       };
-      assert.equal(findLastAssistantMessage([msg] as any[]), null);
+      assert.equal(findLastAssistantMessage([msg]), null);
     });
   });
 
@@ -701,7 +887,8 @@ describe("session.ts", () => {
           },
         }),
       ]);
-      const stats = summarizeSessionStats(file)!;
+      const stats = summarizeSessionStats(file);
+      assert.ok(stats);
       assert.equal(stats.model, "claude-sonnet-4-6");
       assert.equal(stats.toolCount, 3);
       assert.equal(stats.inputTokens, 130);
@@ -722,12 +909,15 @@ describe("session.ts", () => {
           usage: { totalTokens: 10, cost: { total: 0 } },
         }),
       ]);
-      assert.equal(summarizeSessionStats(file)!.model, "claude-sonnet-4-6");
+      const stats = summarizeSessionStats(file);
+      assert.ok(stats);
+      assert.equal(stats.model, "claude-sonnet-4-6");
     });
 
     it("handles missing usage gracefully", () => {
       const file = createSessionFile(dir, [SESSION_HEADER, USER_MSG, ASSISTANT_MSG]);
-      const stats = summarizeSessionStats(file)!;
+      const stats = summarizeSessionStats(file);
+      assert.ok(stats);
       assert.equal(stats.toolCount, 0);
       assert.equal(stats.inputTokens, 0);
       assert.equal(stats.cost, 0);
@@ -1173,7 +1363,7 @@ describe("status.ts", () => {
 });
 
 describe("subagent discovery", () => {
-  const testApi = (subagentsModule as any).__test__;
+  const testApi = testHelpers;
   const testContract = "a".repeat(64);
 
   it("loads the Pi-default fallback setting from agent frontmatter", () => {
@@ -1199,22 +1389,27 @@ describe("subagent discovery", () => {
 
   it("retries a failed configured model once with Pi default", async () => {
     const controller = new AbortController();
-    const primary: any = {
+    const primary: RunningSubagent = {
       id: "primary",
       name: "fallback-agent",
       task: "do work",
       model: "anthropic/preferred",
       fallbackModel: "openai/current-model",
       abortController: controller,
+      surface: "test",
+      startTime: 0,
+      sessionFile: "test.jsonl",
+      statusState: createStatusState({ source: "pi", startTimeMs: 0 }),
+      interactive: false,
     };
-    const fallback: any = {
+    const fallback: RunningSubagent = {
       ...primary,
       id: "fallback",
       model: "openai/current-model",
       modelSource: "Pi default fallback",
       fallbackModel: undefined,
     };
-    const watched: any[] = [];
+    const watched: string[] = [];
     const results = [
       {
         name: primary.name,
@@ -1234,9 +1429,11 @@ describe("subagent discovery", () => {
         assert.equal(model, "openai/current-model");
         return fallback;
       },
-      async (running: any) => {
+      async (running: RunningSubagent) => {
         watched.push(running.id);
-        return results.shift();
+        const result = results.shift();
+        assert.ok(result);
+        return result;
       },
     );
 
@@ -1260,13 +1457,18 @@ describe("subagent discovery", () => {
 
   it("does not retry shutdown-timeout failures with the configured model fallback", async () => {
     const controller = new AbortController();
-    const running: any = {
+    const running: RunningSubagent = {
       id: "timed-out",
       name: "fallback-agent",
       task: "do work",
       model: "anthropic/preferred",
       fallbackModel: "openai/current-model",
       abortController: controller,
+      surface: "test",
+      startTime: 0,
+      sessionFile: "test.jsonl",
+      statusState: createStatusState({ source: "pi", startTimeMs: 0 }),
+      interactive: false,
     };
     let retryCalled = false;
     const result = await testApi.watchSubagentWithFallback(
@@ -1341,22 +1543,25 @@ describe("subagent discovery", () => {
 
   it("resolveEffectiveInteractive defaults to the inverse of auto-exit", () => {
     // Autonomous agents (auto-exit: true) are NOT interactive — parent gets stall pings.
-    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true }), false);
+    assert.equal(testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, { autoExit: true }), false);
     // Agents without auto-exit ARE interactive — parent does not receive status transition pings.
-    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: false }), true);
-    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, {}), true);
+    assert.equal(testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, { autoExit: false }), true);
+    assert.equal(testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, {}), true);
     // Bare spawn with no agent defs (e.g. /iterate fork) is interactive by default.
-    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, null), true);
+    assert.equal(testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, null), true);
   });
 
   it("resolveEffectiveInteractive honors explicit frontmatter over the auto-exit default", () => {
     // Autonomous agent that still wants to be treated as interactive.
     assert.equal(
-      testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { autoExit: true, interactive: true }),
+      testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, { autoExit: true, interactive: true }),
       true,
     );
     // Non-auto-exit agent that opts back into stall pings.
-    assert.equal(testApi.resolveEffectiveInteractive({ name: "A", task: "T" }, { interactive: false }), false);
+    assert.equal(
+      testApi.resolveEffectiveInteractive({ agent: "A", name: "A", task: "T" }, { interactive: false }),
+      false,
+    );
   });
 
   it("bundled scout/researcher/worker all resolve as non-interactive (auto-exit)", () => {
@@ -1365,7 +1570,7 @@ describe("subagent discovery", () => {
       assert.ok(defs, `expected bundled agent ${name} to be discoverable`);
       assert.equal(defs.fallbackModel, "pi-default", `${name} should retry with the Pi default model`);
       assert.equal(
-        testApi.resolveEffectiveInteractive({ name, task: "" }, defs),
+        testApi.resolveEffectiveInteractive({ agent: name, name, task: "" }, defs),
         false,
         `${name} should resolve as non-interactive (autonomous, auto-exit)`,
       );
@@ -1379,7 +1584,8 @@ describe("subagent discovery", () => {
 
     const allowlist = testApi.buildSubagentToolAllowlist(worker.tools, { grantSpawning: true });
     assert.ok(allowlist, "expected an allowlist");
-    const tools = new Set(allowlist!.split(","));
+    assert.ok(allowlist);
+    const tools = new Set(allowlist.split(","));
     for (const t of ["subagent", "subagent_message", "subagents_list"]) {
       assert.ok(tools.has(t), `expected spawning tool ${t} in worker allowlist`);
     }
@@ -1424,7 +1630,7 @@ describe("subagent discovery", () => {
     try {
       const agent = testApi
         .discoverAgentDefinitions(dir)
-        .find((candidate: any) => candidate.name === "child-extension-agent");
+        .find((candidate) => candidate.name === "child-extension-agent");
       assert.deepEqual(agent?.subagentOnlyExtensions, ["./tools/fast-search.ts"]);
       assert.equal(agent?.explicitLoadout, false);
     } finally {
@@ -1447,28 +1653,34 @@ describe("subagent discovery", () => {
   });
 
   it("resolves session mode from frontmatter (standalone default)", () => {
-    assert.equal(testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, null), "standalone");
+    assert.equal(testApi.resolveEffectiveSessionMode({ agent: "A", name: "A", task: "T" }, null), "standalone");
     assert.equal(
-      testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, { sessionMode: "lineage-only" }),
+      testApi.resolveEffectiveSessionMode({ agent: "A", name: "A", task: "T" }, { sessionMode: "lineage-only" }),
       "lineage-only",
     );
-    assert.equal(testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, { sessionMode: "fork" }), "fork");
+    assert.equal(
+      testApi.resolveEffectiveSessionMode({ agent: "A", name: "A", task: "T" }, { sessionMode: "fork" }),
+      "fork",
+    );
   });
 
   it("resolves launch behavior for standalone, lineage-only, and fork modes", () => {
-    assert.deepEqual(testApi.resolveLaunchBehavior({ name: "A", task: "T" }, null), {
+    assert.deepEqual(testApi.resolveLaunchBehavior({ agent: "A", name: "A", task: "T" }, null), {
       sessionMode: "standalone",
       seededSessionMode: null,
       inheritsConversationContext: false,
       taskDelivery: "artifact",
     });
-    assert.deepEqual(testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "lineage-only" }), {
-      sessionMode: "lineage-only",
-      seededSessionMode: "lineage-only",
-      inheritsConversationContext: false,
-      taskDelivery: "artifact",
-    });
-    assert.deepEqual(testApi.resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "fork" }), {
+    assert.deepEqual(
+      testApi.resolveLaunchBehavior({ agent: "A", name: "A", task: "T" }, { sessionMode: "lineage-only" }),
+      {
+        sessionMode: "lineage-only",
+        seededSessionMode: "lineage-only",
+        inheritsConversationContext: false,
+        taskDelivery: "artifact",
+      },
+    );
+    assert.deepEqual(testApi.resolveLaunchBehavior({ agent: "A", name: "A", task: "T" }, { sessionMode: "fork" }), {
       sessionMode: "fork",
       seededSessionMode: "fork",
       inheritsConversationContext: true,
@@ -1650,7 +1862,7 @@ describe("subagent discovery", () => {
         description: "Read a value.",
         parameters: { type: "object" },
         sourceInfo: { path: "builtin:mcp" },
-        namespace: { name: "mcp__selected_server", aliases: ["selected-server"] },
+        namespace: { aliases: ["selected-server"] },
       },
     ]);
     assert.equal(providers[0].mcpServer, "selected-server");
@@ -2057,7 +2269,9 @@ describe("subagent discovery", () => {
         /trusted registration identity/,
       );
       const resolved = resolveExplicitLoadout(
-        { extensions: ["untrusted-extension"], tools: [], identity: "profile-controlled" } as any,
+        { extensions: ["untrusted-extension"], tools: [], identity: "profile-controlled" } as Parameters<
+          typeof resolveExplicitLoadout
+        >[0],
         [{ name: "untrusted-extension", path, identity: "trusted-registration@1" }],
         [],
       );
@@ -2207,28 +2421,37 @@ describe("subagent discovery", () => {
       },
     ];
     assert.deepEqual(authorizeToolCall("web_search", grants, providers), { allowed: true });
-    assert.match(authorizeToolCall("web_fetch", grants, providers).reason ?? "", /not granted/);
+    const notGranted = authorizeToolCall("web_fetch", grants, providers);
+    assert.equal(notGranted.allowed, false);
+    if (notGranted.allowed) throw new Error("expected denied call");
+    assert.match(notGranted.reason, /not granted/);
     assert.match(
-      authorizeToolCall("web_search", grants, [
-        { name: "web_search", provider: "/extensions/other.ts", contractFingerprint: testContract },
-      ]).reason ?? "",
+      deniedToolCallReason(
+        authorizeToolCall("web_search", grants, [
+          { name: "web_search", provider: "/extensions/other.ts", contractFingerprint: testContract },
+        ]),
+      ),
       /provider or contract changed/,
     );
     assert.match(
-      authorizeToolCall("web_search", grants, [
-        {
-          name: "web_search",
-          provider: "/extensions/web-search.ts",
-          contractFingerprint: "changed",
-        },
-      ]).reason ?? "",
+      deniedToolCallReason(
+        authorizeToolCall("web_search", grants, [
+          {
+            name: "web_search",
+            provider: "/extensions/web-search.ts",
+            contractFingerprint: "changed",
+          },
+        ]),
+      ),
       /provider or contract changed/,
     );
     assert.match(
-      authorizeToolCall("web_search", grants, [
-        ...providers,
-        { name: "web_search", provider: "/extensions/duplicate.ts", contractFingerprint: testContract },
-      ]).reason ?? "",
+      deniedToolCallReason(
+        authorizeToolCall("web_search", grants, [
+          ...providers,
+          { name: "web_search", provider: "/extensions/duplicate.ts", contractFingerprint: testContract },
+        ]),
+      ),
       /provider or contract changed/,
     );
   });
@@ -2255,7 +2478,7 @@ describe("subagent discovery", () => {
   it("binds explicitly granted child-only extension tools to their loaded provider", () => {
     const extensionPath = "/child/extensions/web-access.ts";
     const actual = { name: "web_search", provider: extensionPath, contractFingerprint: testContract };
-    let pinned: readonly any[] = [];
+    let pinned: readonly ResolvedToolProvider[] = [];
     const policy = createToolPolicyHandlers(
       [{ name: "web_search", provider: "subagent-only-extension", runnerManaged: true }],
       () => [actual],
@@ -2282,8 +2505,8 @@ describe("subagent discovery", () => {
   it("defers child-only extension readiness until before_agent_start", async () => {
     const extensionPath = "/child/extensions/context-mode.js";
     const grant = { name: "ctx_execute", provider: CHILD_ONLY_EXTENSION_PROVIDER, runnerManaged: true };
-    let providers: any[] = [];
-    let pinned: readonly any[] = [];
+    let providers: ResolvedToolProvider[] = [];
+    let pinned: readonly ResolvedToolProvider[] = [];
     let validatedSignals = 0;
     let readinessSignals = 0;
     const previousDeadline = process.env.PI_SUBAGENT_STARTUP_DEADLINE_MS;
@@ -2325,7 +2548,7 @@ describe("subagent discovery", () => {
   it("defers pinned child-only extension tools on resume until before_agent_start", async () => {
     const extensionPath = "/child/extensions/context-mode.js";
     const grant = { name: "ctx_execute", provider: extensionPath, contractFingerprint: testContract };
-    let providers: any[] = [];
+    let providers: ResolvedToolProvider[] = [];
     const policy = createToolPolicyHandlers([grant], () => providers, undefined, undefined, undefined, undefined, [
       extensionPath,
     ]);
@@ -2450,7 +2673,7 @@ describe("subagent discovery", () => {
   });
 
   it("pins runner-managed tool contracts on the first start and checks them thereafter", () => {
-    let pinned: readonly any[] = [];
+    let pinned: readonly ResolvedToolProvider[] = [];
     let providers = [
       {
         name: "ask_question",
@@ -2470,7 +2693,7 @@ describe("subagent discovery", () => {
         assert.fail("runner tool contract should pin successfully");
       },
     });
-    assert.equal((pinned[0] as any).contractFingerprint, testContract);
+    assert.equal(pinned[0]?.contractFingerprint, testContract);
     assert.deepEqual(policy.handleInput(), { action: "continue" });
     assert.equal(policy.authorize({ toolName: "ask_question" }), undefined);
     providers = [
@@ -2756,16 +2979,15 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      subagentsModule.default(api);
 
-      const tool = registeredTools.find((tool) => tool.name === "subagents_list");
-      assert.ok(tool, "expected subagents_list to be registered");
+      const tool = findRegisteredTool(registeredTools, "subagents_list");
 
-      const result = await tool.execute();
-      const agents = result.details?.agents ?? [];
+      const result = await executeRegisteredTool(tool);
+      const agents = agentsFromToolResult(result);
 
-      assert.ok(agents.some((agent: any) => agent.name === "visible-discovery-test-agent"));
-      assert.match(result.content[0].text, /visible-discovery-test-agent/);
+      assert.ok(agents.some((agent) => agent.name === "visible-discovery-test-agent"));
+      assert.match(textFromToolResult(result), /visible-discovery-test-agent/);
     });
   });
 
@@ -2784,19 +3006,18 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      subagentsModule.default(api);
 
-      const tool = registeredTools.find((tool) => tool.name === "subagents_list");
-      assert.ok(tool, "expected subagents_list to be registered");
+      const tool = findRegisteredTool(registeredTools, "subagents_list");
 
-      const result = await tool.execute();
-      const agents = result.details?.agents ?? [];
+      const result = await executeRegisteredTool(tool);
+      const agents = agentsFromToolResult(result);
 
       assert.equal(
-        agents.some((agent: any) => agent.name === "hidden-discovery-test-agent"),
+        agents.some((agent) => agent.name === "hidden-discovery-test-agent"),
         false,
       );
-      assert.doesNotMatch(result.content[0].text, /hidden-discovery-test-agent/);
+      assert.doesNotMatch(textFromToolResult(result), /hidden-discovery-test-agent/);
 
       const loaded = testApi.loadAgentDefaults("hidden-discovery-test-agent");
       assert.ok(loaded, "expected hidden agent to remain directly loadable");
@@ -2831,19 +3052,18 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      subagentsModule.default(api);
 
-      const tool = registeredTools.find((tool) => tool.name === "subagents_list");
-      assert.ok(tool, "expected subagents_list to be registered");
+      const tool = findRegisteredTool(registeredTools, "subagents_list");
 
-      const result = await tool.execute();
-      const agents = result.details?.agents ?? [];
+      const result = await executeRegisteredTool(tool);
+      const agents = agentsFromToolResult(result);
 
       assert.equal(
-        agents.some((agent: any) => agent.name === "shadowed-discovery-test-agent"),
+        agents.some((agent) => agent.name === "shadowed-discovery-test-agent"),
         false,
       );
-      assert.doesNotMatch(result.content[0].text, /shadowed-discovery-test-agent/);
+      assert.doesNotMatch(textFromToolResult(result), /shadowed-discovery-test-agent/);
 
       const loaded = testApi.loadAgentDefaults("shadowed-discovery-test-agent");
       assert.ok(loaded, "expected project override to remain directly loadable");
@@ -2930,8 +3150,8 @@ describe("subagent-done.ts", () => {
       const messages = [{ role: "assistant", stopReason: "error" }];
       const info = findLatestAssistantError(messages);
       assert.ok(info);
-      assert.equal(info!.stopReason, "error");
-      assert.match(info!.errorMessage, /stopReason=error/);
+      assert.equal(info.stopReason, "error");
+      assert.match(info.errorMessage, /stopReason=error/);
     });
 
     it("returns null when messages is undefined or empty", () => {
@@ -2943,12 +3163,12 @@ describe("subagent-done.ts", () => {
   describe("runningChildrenCount", () => {
     const KEY = Symbol.for("pi-subagents/running-children-count");
     function withGlobal(value: unknown, run: () => void) {
-      const prev = (globalThis as any)[KEY];
-      (globalThis as any)[KEY] = value;
+      const prev = Reflect.get(globalThis, KEY);
+      Reflect.set(globalThis, KEY, value);
       try {
         run();
       } finally {
-        (globalThis as any)[KEY] = prev;
+        Reflect.set(globalThis, KEY, prev);
       }
     }
 
@@ -3019,7 +3239,7 @@ describe("subagent-done.ts", () => {
         const names = mock.registeredTools.map((t) => t.name);
         assert.ok(names.includes("ask_question"));
         assert.ok(!names.includes("caller_ping"));
-        const tool = mock.registeredTools.find((t) => t.name === "ask_question");
+        const tool = findRegisteredTool(mock.registeredTools, "ask_question");
         assert.deepEqual(Object.keys(tool.parameters.properties), ["question"]);
         assert.match(tool.description, /orchestrator/i);
       } finally {
@@ -3033,17 +3253,17 @@ describe("subagent-done.ts", () => {
       const sessionFile = join(dir, "s.jsonl");
       const { mock, restore } = setupSubagentExtension(sessionFile);
       try {
-        const tool = mock.registeredTools.find((t) => t.name === "ask_question");
+        const tool = findRegisteredTool(mock.registeredTools, "ask_question");
         let shutdownCalled = false;
         const ctx = {
           shutdown() {
             shutdownCalled = true;
           },
-        } as any;
+        };
         const out = await tool.execute("call-1", { question: "Which API base URL?" }, undefined, undefined, ctx);
 
         assert.equal(shutdownCalled, false, "ask_question must keep the session open");
-        assert.match(out.content[0].text, /wait/i);
+        assert.match(textFromToolResult(out), /wait/i);
 
         const askFile = `${sessionFile}.ask`;
         assert.ok(existsSync(askFile), ".ask signal file should be written");
@@ -3063,15 +3283,16 @@ describe("subagent-done.ts", () => {
     // asking run is still open fires `input` but NOT `agent_start`, so the flag
     // must be cleared on `input` or the session parks forever.
     function setupCapturingExtension(sessionFile: string) {
-      const handlers = new Map<string, Array<(...args: any[]) => void>>();
-      const tools: any[] = [];
+      const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+      const tools: TestRegisteredTool[] = [];
       const api = {
-        on(event: string, handler: (...args: any[]) => void) {
-          if (!handlers.has(event)) handlers.set(event, []);
-          handlers.get(event)!.push(handler);
+        on(event: string, handler: (...args: unknown[]) => void) {
+          const eventHandlers = handlers.get(event) ?? [];
+          eventHandlers.push(handler);
+          handlers.set(event, eventHandlers);
         },
-        registerTool(t: any) {
-          tools.push(t);
+        registerTool(t: RegisteredTool) {
+          tools.push(adaptRegisteredTool(t));
         },
         registerCommand() {},
         registerMessageRenderer() {},
@@ -3081,7 +3302,7 @@ describe("subagent-done.ts", () => {
         getAllTools() {
           return [];
         },
-      } as any;
+      } as unknown as ExtensionAPI;
       const saved = {
         session: process.env.PI_SUBAGENT_SESSION,
         name: process.env.PI_SUBAGENT_NAME,
@@ -3093,7 +3314,11 @@ describe("subagent-done.ts", () => {
       process.env.PI_SUBAGENT_AGENT = "scout";
       process.env.PI_SUBAGENT_AUTO_EXIT = "1";
       subagentDoneExtension(api);
-      const emit = (event: string, ...args: any[]) => (handlers.get(event) ?? []).forEach((h) => h(...args));
+      const emit = (event: string, ...args: unknown[]) => {
+        (handlers.get(event) ?? []).forEach((handler) => {
+          handler(...args);
+        });
+      };
       const restore = () => {
         restoreEnvVar("PI_SUBAGENT_SESSION", saved.session);
         restoreEnvVar("PI_SUBAGENT_NAME", saved.name);
@@ -3101,7 +3326,7 @@ describe("subagent-done.ts", () => {
         restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", saved.autoExit);
       };
       const ask = async () => {
-        const tool = tools.find((t) => t.name === "ask_question");
+        const tool = findRegisteredTool(tools, "ask_question");
         await tool.execute("c1", { question: "v1 or v2?" }, undefined, undefined, {
           shutdown() {},
         });
@@ -3376,10 +3601,9 @@ describe("commands", () => {
   it("/subagent emits a spawn tool call for a known agent", () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
 
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
-    const subagent = registeredCommands.find((command) => command.name === "subagent");
-    assert.ok(subagent, "expected /subagent to be registered");
+    const subagent = findRegisteredCommand(registeredCommands, "subagent");
 
     subagent.handler("scout map the auth code", {
       ui: { notify() {} },
@@ -3391,7 +3615,7 @@ describe("commands", () => {
   });
 
   it("scrolls the model catalog with a ten-row window and searchable metadata", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const items = Array.from({ length: 15 }, (_, index) => ({
       value: `provider-${index}/model-${index}`,
       label: `provider-${index}/model-${index}`,
@@ -3410,16 +3634,16 @@ describe("commands", () => {
     };
     let selected: string | undefined;
     const picker = new testApi.ScrollableModelPicker(
-      { requestRender() {} },
-      { fg: (_color: string, text: string) => text },
-      { matches: (data: string, action: string) => data === actions[action] },
+      { requestRender() {} } as TUI,
+      { fg: (_color: string, text: string) => text } as Theme,
+      { matches: (data: string, action: string) => data === actions[action] } as KeybindingsManager,
       items,
       (value: string | undefined) => {
         selected = value;
       },
     );
 
-    let lines = picker.render(120);
+    const lines = picker.render(120);
     assert.equal(lines[0], "─".repeat(120));
     assert.equal(lines.at(-1), "─".repeat(120));
     let visible = lines.join("\n");
@@ -3438,9 +3662,9 @@ describe("commands", () => {
 
     let preselected: string | undefined;
     const savedModelPicker = new testApi.ScrollableModelPicker(
-      { requestRender() {} },
-      { fg: (_color: string, text: string) => text },
-      { matches: (data: string, action: string) => data === actions[action] },
+      { requestRender() {} } as TUI,
+      { fg: (_color: string, text: string) => text } as Theme,
+      { matches: (data: string, action: string) => data === actions[action] } as KeybindingsManager,
       items,
       (value: string | undefined) => {
         preselected = value;
@@ -3452,7 +3676,7 @@ describe("commands", () => {
   });
 
   it("filters thinking choices by model capabilities and includes all levels for unknown models", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.deepEqual(testApi.thinkingLevelsForModel(undefined), ["off", "minimal", "low", "medium", "high", "xhigh"]);
     assert.deepEqual(testApi.thinkingLevelsForModel({ id: "unknown", reasoning: false }), ["off"]);
     assert.deepEqual(testApi.thinkingLevelsForModel({ id: "gpt-4o", reasoning: true }), [
@@ -3482,7 +3706,7 @@ describe("commands", () => {
       id: "parent",
       name: "Parent",
       contextWindow: 32_000,
-    } as any;
+    } satisfies TestModelLike;
     assert.equal(testApi.preferredModelId(undefined, selectedModel), "openai/parent");
     const pickerItems = testApi.modelPickerItems([selectedModel], "custom/provider/model");
     assert.equal(pickerItems[0].value, "custom/provider/model");
@@ -3494,7 +3718,7 @@ describe("commands", () => {
   });
 
   it("saves a Pi-default thinking choice by removing its frontmatter field", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const content = "---\nname: test-agent\nmodel: openai/old\nthinking: high\ntools: read\n---\nAgent body\n";
     const updated = testApi.updateAgentDefaults(content, "openai/new", null);
     assert.ok(updated);
@@ -3506,8 +3730,8 @@ describe("commands", () => {
 
   it("/subagents lets the user choose a model for one spawn", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     assert.ok(command, "expected /subagents to be registered");
 
     const models = [
@@ -3556,8 +3780,8 @@ describe("commands", () => {
 
   it("/subagents preselects saved model and thinking for a one-off spawn", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     const dir = createTestDir();
     const agentsDir = join(dir, ".pi", "agents");
     writeAgentFile(agentsDir, "picker-agent", "name: picker-agent\nmodel: openai/saved\nthinking: high");
@@ -3593,8 +3817,8 @@ describe("commands", () => {
 
   it("/subagents preselects the parent model and Pi default when the agent has no defaults", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     const dir = createTestDir();
     const agentsDir = join(dir, ".pi", "agents");
     writeAgentFile(agentsDir, "picker-agent", "name: picker-agent");
@@ -3631,16 +3855,15 @@ describe("commands", () => {
 
   it("/subagents accepts an unlisted manual model ID with a warning", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
-    const notices: Array<{ message: string; level: string }> = [];
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
+    const notices: Array<{ message: string; level?: "error" | "info" | "warning" }> = [];
 
     await command.handler("", {
       cwd: process.cwd(),
       mode: "tui",
       modelRegistry: { getAvailable: () => [] },
       ui: {
-        custom: chooseFromCustomModelPicker(),
         select: async (title: string, options: string[]) => {
           if (title === "Choose an agent") return options.find((option) => option === "scout");
           if (title === "Choose an action") return options.find((option) => option === "Spawn once");
@@ -3649,7 +3872,7 @@ describe("commands", () => {
         },
         custom: chooseFromCustomModelPicker(1),
         input: async (title: string) => (title === "Enter provider/model ID" ? "custom/provider/model" : "inspect"),
-        notify(message: string, level: string) {
+        notify(message: string, level?: "error" | "info" | "warning") {
           notices.push({ message, level });
         },
       },
@@ -3662,16 +3885,15 @@ describe("commands", () => {
 
   it("/subagents rejects malformed manual model IDs before spawning", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
-    const notices: Array<{ message: string; level: string }> = [];
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
+    const notices: Array<{ message: string; level?: "error" | "info" | "warning" }> = [];
 
     await command.handler("", {
       cwd: process.cwd(),
       mode: "tui",
       modelRegistry: { getAvailable: () => [] },
       ui: {
-        custom: chooseFromCustomModelPicker(),
         select: async (title: string, options: string[]) => {
           if (title === "Choose an agent") return options.find((option) => option === "scout");
           if (title === "Choose an action") return options.find((option) => option === "Spawn once");
@@ -3680,7 +3902,7 @@ describe("commands", () => {
         },
         custom: chooseFromCustomModelPicker(1),
         input: async (title: string) => (title === "Enter provider/model ID" ? "missing-provider" : undefined),
-        notify(message: string, level: string) {
+        notify(message: string, level?: "error" | "info" | "warning") {
           notices.push({ message, level });
         },
       },
@@ -3692,8 +3914,8 @@ describe("commands", () => {
 
   it("/subagents explains when a global default is shadowed by a project agent", async () => {
     const { api, registeredCommands } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     const dir = createTestDir();
     const agentsDir = join(dir, ".pi", "agents");
     writeAgentFile(agentsDir, "project-agent", "name: project-agent\nmodel: openai/old");
@@ -3736,8 +3958,8 @@ describe("commands", () => {
 
   it("/subagents saves a project default without losing the agent profile", async () => {
     const { api, registeredCommands } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
     writeAgentFile(
@@ -3785,8 +4007,8 @@ describe("commands", () => {
 
   it("/subagents removes a saved thinking field when Pi default is saved", async () => {
     const { api, registeredCommands } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
     writeAgentFile(projectAgents, "local-agent", "name: local-agent\nmodel: openai/model-test\nthinking: high");
@@ -3826,8 +4048,8 @@ describe("commands", () => {
 
   it("/subagents cancellation before selection has no side effects", async () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const command = registeredCommands.find((entry) => entry.name === "subagents");
+    subagentsModule.default(api);
+    const command = findRegisteredCommand(registeredCommands, "subagents");
     assert.ok(command, "expected /subagents to be registered");
 
     await command.handler("", {
@@ -3842,17 +4064,18 @@ describe("commands", () => {
 
   it("subagents_list shows configured defaults and the Pi fallback", async () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const tool = registeredTools.find((entry) => entry.name === "subagents_list");
+    subagentsModule.default(api);
+    const tool = findRegisteredTool(registeredTools, "subagents_list");
     const dir = createTestDir();
     const projectAgents = join(dir, ".pi", "agents");
     writeAgentFile(projectAgents, "with-model", "name: with-model\nmodel: openai/model-x");
     writeAgentFile(projectAgents, "without-model", "name: without-model");
 
     try {
-      const result = await tool.execute("call", {}, undefined, undefined, { cwd: dir });
-      assert.match(result.content[0].text, /with-model \(project\) \[openai\/model-x\]/);
-      assert.match(result.content[0].text, /without-model \(project\) \[Pi default\]/);
+      const result = await executeRegisteredTool(tool, {}, { cwd: dir });
+      const output = textFromToolResult(result);
+      assert.match(output, /with-model \(project\) \[openai\/model-x\]/);
+      assert.match(output, /without-model \(project\) \[Pi default\]/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3860,7 +4083,7 @@ describe("commands", () => {
 
   it("does not register the removed /iterate or /plan commands", () => {
     const { api, registeredCommands } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
     assert.equal(
       registeredCommands.find((c) => c.name === "iterate"),
       undefined,
@@ -3874,7 +4097,7 @@ describe("commands", () => {
 
 describe("tool registration", () => {
   it("always resumes subagents as autonomous (auto-exit, non-interactive tracking)", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
 
     assert.deepEqual(testApi.resolveResumeLaunchBehavior(), {
       autoExit: true,
@@ -3884,19 +4107,19 @@ describe("tool registration", () => {
 
   it("rejects a top-level spawn with no agent and no fork", async () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
+    subagentsModule.default(api);
+    const subagentTool = findRegisteredTool(registeredTools, "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
     const result = await subagentTool.execute("call-1", { name: "x", task: "do it" });
     assert.equal(result.details?.error, "agent required");
-    assert.match(result.content[0].text, /specify which agent/i);
+    assert.match(textFromToolResult(result), /specify which agent/i);
   });
 
   it("rejects a top-level spawn naming an unknown agent", async () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
-    const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
+    subagentsModule.default(api);
+    const subagentTool = findRegisteredTool(registeredTools, "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
     const result = await subagentTool.execute("call-1", {
@@ -3905,14 +4128,14 @@ describe("tool registration", () => {
       agent: "wizard",
     });
     assert.equal(result.details?.error, "unknown agent");
-    assert.match(result.content[0].text, /not a known agent/i);
+    assert.match(textFromToolResult(result), /not a known agent/i);
   });
 
   it("exposes a debloated schema with an optional model and thinking override", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
-    const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
+    const subagentTool = findRegisteredTool(registeredTools, "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
     const props = subagentTool.parameters.properties;
@@ -3927,7 +4150,7 @@ describe("tool registration", () => {
       "agent and task must be required",
     );
     // `name` is now optional and purely cosmetic.
-    assert.match(props.name.description, /cosmetic/i);
+    assert.match(props.name.description ?? "", /cosmetic/i);
     // The removed override knobs must be gone.
     for (const gone of ["tools", "skills", "systemPrompt", "fork", "interactive", "resumeSessionId"]) {
       assert.equal(props[gone], undefined, `expected ${gone} param to be removed`);
@@ -3936,9 +4159,9 @@ describe("tool registration", () => {
 
   it("renders partial subagent tool-call args without throwing", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
-    const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
+    const subagentTool = findRegisteredTool(registeredTools, "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
     const theme = {
@@ -3949,7 +4172,9 @@ describe("tool registration", () => {
         return text;
       },
     };
-    const rendered = subagentTool.renderCall({}, theme);
+    if (!subagentTool.renderCall) throw new Error("Expected subagent tool renderCall");
+    const rendered = subagentTool.renderCall({}, theme as Theme);
+    if (!rendered) throw new Error("Expected status renderer component");
     const output = rendered.render(80).join("\n");
 
     assert.match(output, /\(unnamed\)/);
@@ -3957,9 +4182,9 @@ describe("tool registration", () => {
 
   it("registers subagent_message with name + message both required (name-only addressing)", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
-    const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
+    const messageTool = findRegisteredTool(registeredTools, "subagent_message");
     assert.ok(messageTool, "expected subagent_message tool to be registered");
 
     const props = messageTool.parameters.properties;
@@ -3981,7 +4206,7 @@ describe("tool registration", () => {
 
   it("no longer registers subagent_interrupt or subagent_resume", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
     const names = registeredTools.map((tool) => tool.name);
     assert.equal(names.includes("subagent_interrupt"), false);
     assert.equal(names.includes("subagent_resume"), false);
@@ -4161,7 +4386,7 @@ describe("subagent activity snapshots", () => {
 });
 
 describe("subagent interruption", () => {
-  function makeRunning(overrides: Record<string, unknown> = {}) {
+  function makeRunning(overrides: Partial<RunningSubagent> = {}): RunningSubagent {
     return {
       id: "a1",
       name: "Worker",
@@ -4177,7 +4402,7 @@ describe("subagent interruption", () => {
 
   it("registers subagent_message and not the old interrupt/resume tools", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
     const names = registeredTools.map((tool) => tool.name);
     assert.equal(names.includes("subagent_message"), true);
     assert.equal(names.includes("subagent_interrupt"), false);
@@ -4185,8 +4410,8 @@ describe("subagent interruption", () => {
   });
 
   it("resolves a running subagent by exact name and reports ambiguity", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     runningMap.clear();
 
     try {
@@ -4195,12 +4420,15 @@ describe("subagent interruption", () => {
       runningMap.set("c3", makeRunning({ id: "c3", name: "Scout", surface: "c3", sessionFile: "c3.jsonl" }));
 
       const byName = testApi.resolveRunningByName("Scout");
+      assertResolvedRunning(byName);
       assert.equal(byName.running.id, "c3");
 
       const ambiguous = testApi.resolveRunningByName("Worker");
+      assertResolveError(ambiguous);
       assert.match(ambiguous.error, /Ambiguous subagent name/);
 
       const missing = testApi.resolveRunningByName("Ghost");
+      assertResolveError(missing);
       assert.match(missing.error, /No running subagent named "Ghost"/);
     } finally {
       runningMap.clear();
@@ -4208,8 +4436,8 @@ describe("subagent interruption", () => {
   });
 
   it("uniqueRunningName suffixes defaulted names that collide with running subagents", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     runningMap.clear();
 
     try {
@@ -4230,8 +4458,8 @@ describe("subagent interruption", () => {
   });
 
   it("uniqueRunningName also avoids names already taken in the persistent registry", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     const reserved = testApi.reservedNames as Set<string>;
     runningMap.clear();
     reserved.clear();
@@ -4252,8 +4480,8 @@ describe("subagent interruption", () => {
   });
 
   it("uniqueRunningName also avoids names reserved by in-flight parallel spawns", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     const reserved = testApi.reservedNames as Set<string>;
     runningMap.clear();
     reserved.clear();
@@ -4273,7 +4501,7 @@ describe("subagent interruption", () => {
   });
 
   it("steers a running subagent by typing into its pane (newlines flattened)", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     let sentSurface = "";
     let sentText = "";
     const running = makeRunning();
@@ -4289,19 +4517,20 @@ describe("subagent interruption", () => {
   });
 
   it("returns an explicit error when steering delivery fails", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const running = makeRunning();
 
     const result = testApi.steerSubagent(running, "hi", () => {
       throw new Error("mux write failed");
     });
 
+    assertToolError(result);
     assert.match(result.error, /Failed to deliver message/);
   });
 
   it("delivers a steer message and forces local status waiting", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     let sentSurface = "";
     let sentText = "";
     runningMap.clear();
@@ -4333,9 +4562,9 @@ describe("subagent interruption", () => {
 
       assert.equal(sentSurface, "pane-1");
       assert.equal(sentText, "keep going");
-      assert.equal(result.content[0].text.includes('Message delivered to running subagent "Worker"'), true);
+      assert.match(textFromToolResult(result), /Message delivered to running subagent "Worker"/);
       assert.deepEqual(result.details, { id: "a1", name: "Worker", status: "steered" });
-      const snapshot = classifyStatus(runningMap.get("a1").statusState, 20_000);
+      const snapshot = classifyStatus(getRunning(runningMap, "a1").statusState, 20_000);
       assert.equal(snapshot.kind, "waiting");
       assert.equal(runningMap.has("a1"), true);
     } finally {
@@ -4344,21 +4573,21 @@ describe("subagent interruption", () => {
   });
 
   it("requires a message when steering", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     runningMap.clear();
     try {
       runningMap.set("a1", makeRunning());
       const result = testApi.handleSubagentSteer({ name: "Worker", message: "  " }, () => {});
-      assert.match(result.content[0].text, /`message` is required/);
+      assert.match(textFromToolResult(result), /`message` is required/);
     } finally {
       runningMap.clear();
     }
   });
 
   it("leaves status unchanged when steering delivery fails in the tool path", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const testApi = testHelpers;
+    const runningMap = testApi.runningSubagents;
     runningMap.clear();
 
     const activeState = observeStatus(
@@ -4385,15 +4614,15 @@ describe("subagent interruption", () => {
         }),
       );
 
-      assert.match(result.content[0].text, /Failed to deliver message/);
-      assert.equal(classifyStatus(runningMap.get("a1").statusState, 20_000).kind, "active");
+      assert.match(textFromToolResult(result), /Failed to deliver message/);
+      assert.equal(classifyStatus(getRunning(runningMap, "a1").statusState, 20_000).kind, "active");
     } finally {
       runningMap.clear();
     }
   });
 
   it("formats exit code 130 as an ordinary failure", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const presentation = testApi.resolveResultPresentation(
       {
         exitCode: 130,
@@ -4418,7 +4647,7 @@ describe("subagent interruption", () => {
     // quickly. With the error sidecar plumbed through, the presentation
     // must call out the failure, include the underlying error, and tell the
     // orchestrator how to recover.
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const presentation = testApi.resolveResultPresentation(
       {
         exitCode: 1,
@@ -4457,7 +4686,7 @@ describe("subagent status renderer", () => {
 
   it("renders only capped lines plus overflow", () => {
     const { api, registeredMessageRenderers } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
     const rendererEntry = registeredMessageRenderers.find((entry) => entry.name === "subagent_status");
     assert.ok(rendererEntry, "expected subagent_status renderer to be registered");
@@ -4470,6 +4699,9 @@ describe("subagent status renderer", () => {
     ];
     const rendered = rendererEntry.renderer(
       {
+        role: "custom",
+        display: true,
+        timestamp: Date.now(),
         customType: "subagent_status",
         content: "Subagent status:\n• Worker running 5m, active (bash 2m).",
         details: {
@@ -4480,6 +4712,7 @@ describe("subagent status renderer", () => {
       { expanded: true },
       createTheme(),
     );
+    if (!rendered) throw new Error("Expected status renderer component");
     const output = rendered.render(80).join("\n");
 
     assert.match(output, /Subagent status/);
@@ -4491,13 +4724,16 @@ describe("subagent status renderer", () => {
 
   it("stays within narrow widths", () => {
     const { api, registeredMessageRenderers } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    subagentsModule.default(api);
 
     const rendererEntry = registeredMessageRenderers.find((entry) => entry.name === "subagent_status");
     assert.ok(rendererEntry, "expected subagent_status renderer to be registered");
 
     const rendered = rendererEntry.renderer(
       {
+        role: "custom",
+        display: true,
+        timestamp: Date.now(),
         customType: "subagent_status",
         content: "Subagent status:\n• Worker running 5m, active (bash 2m).",
         details: { lines: ["Worker running 5m, active (bash 2m)."], overflow: 0 },
@@ -4506,6 +4742,7 @@ describe("subagent status renderer", () => {
       createTheme(),
     );
 
+    if (!rendered) throw new Error("Expected status renderer component");
     for (const width of [4, 5, 6]) {
       for (const line of rendered.render(width)) {
         assert.ok(
@@ -4519,7 +4756,7 @@ describe("subagent status renderer", () => {
 
 describe("subagent startup delay", () => {
   it("defaults to 500ms when no env var is set", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.ok(testApi, "expected subagents test helpers to be exported");
     assert.equal(typeof testApi.getShellReadyDelayMs, "function");
 
@@ -4534,7 +4771,7 @@ describe("subagent startup delay", () => {
   });
 
   it("uses PI_SUBAGENT_SHELL_READY_DELAY_MS when it is set", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.ok(testApi, "expected subagents test helpers to be exported");
     assert.equal(typeof testApi.getShellReadyDelayMs, "function");
 
@@ -4550,7 +4787,7 @@ describe("subagent startup delay", () => {
 });
 describe("subagents widget rendering", () => {
   it("keeps every rendered line within a very narrow width", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.ok(testApi, "expected subagents test helpers to be exported");
     assert.equal(typeof testApi.renderSubagentWidgetLines, "function");
 
@@ -4567,6 +4804,7 @@ describe("subagents widget rendering", () => {
             startTime: 1_000_000 - 13_000,
             sessionFile: "sess1",
             statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 13_000 }),
+            interactive: false,
           },
           {
             id: "a2",
@@ -4576,6 +4814,7 @@ describe("subagents widget rendering", () => {
             startTime: 1_000_000 - 21_000,
             sessionFile: "sess2",
             statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 21_000 }),
+            interactive: false,
           },
           {
             id: "a3",
@@ -4585,6 +4824,7 @@ describe("subagents widget rendering", () => {
             startTime: 1_000_000 - 27_000,
             sessionFile: "sess3",
             statusState: createStatusState({ source: "pi", startTimeMs: 1_000_000 - 27_000 }),
+            interactive: false,
           },
         ],
         16,
@@ -4600,7 +4840,7 @@ describe("subagents widget rendering", () => {
   });
 
   it("shows the model and its source in active-subagent status", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     const startTime = Date.now();
     const lines = testApi.renderSubagentWidgetLines(
       [
@@ -4615,6 +4855,7 @@ describe("subagents widget rendering", () => {
           startTime,
           sessionFile: "missing-session",
           statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+          interactive: false,
         },
       ],
       100,
@@ -4625,7 +4866,7 @@ describe("subagents widget rendering", () => {
   });
 
   it("shows the model reported by a running session when available", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     withTempDir((dir) => {
       const sessionFile = createSessionFile(dir, [
         SESSION_HEADER,
@@ -4654,6 +4895,7 @@ describe("subagents widget rendering", () => {
             startTime,
             sessionFile,
             statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+            interactive: false,
           },
         ],
         100,
@@ -4664,7 +4906,7 @@ describe("subagents widget rendering", () => {
   });
 
   it("truncates the right-hand status instead of overflowing when it alone is too wide", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.ok(testApi, "expected subagents test helpers to be exported");
     assert.equal(typeof testApi.borderLine, "function");
 
@@ -4673,7 +4915,7 @@ describe("subagents widget rendering", () => {
   });
 
   it("handles ultra-narrow widths without exceeding the width contract", () => {
-    const testApi = (subagentsModule as any).__test__;
+    const testApi = testHelpers;
     assert.ok(testApi, "expected subagents test helpers to be exported");
     assert.equal(typeof testApi.renderSubagentWidgetLines, "function");
 
@@ -4690,6 +4932,7 @@ describe("subagents widget rendering", () => {
             startTime,
             sessionFile: "sess1",
             statusState: createStatusState({ source: "pi", startTimeMs: startTime }),
+            interactive: false,
           },
         ],
         width,
@@ -4706,7 +4949,7 @@ describe("subagents widget rendering", () => {
 });
 
 describe("subagent display helpers", () => {
-  const testApi = (subagentsModule as any).__test__;
+  const testApi = testHelpers;
 
   describe("formatTokens", () => {
     it("renders raw counts below 1k, 1 decimal below 10k, rounded k above", () => {
@@ -4770,7 +5013,7 @@ describe("subagent display helpers", () => {
 
   describe("widgetIcon", () => {
     it("maps active/running to a glyph and waiting/starting to another", () => {
-      const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+      const strip = (s: string) => s.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "");
       assert.equal(strip(testApi.widgetIcon("active")), "⟳");
       assert.equal(strip(testApi.widgetIcon("running")), "⟳");
       assert.equal(strip(testApi.widgetIcon("stalled")), "⟳");

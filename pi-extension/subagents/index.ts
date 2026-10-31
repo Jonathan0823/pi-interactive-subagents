@@ -7,7 +7,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, keyHint } from "@mariozechner/pi-coding-agent";
 import * as piAi from "@mariozechner/pi-ai";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@mariozechner/pi-ai";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox";
@@ -114,28 +114,30 @@ const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
 // the old module keep running. See https://github.com/HazAT/pi-interactive-subagents/issues/5
+const globalState = globalThis as unknown as Record<symbol, unknown> & Record<string, unknown>;
 const WIDGET_INTERVAL_KEY = Symbol.for("pi-subagents/widget-interval");
 const STATUS_INTERVAL_KEY = Symbol.for("pi-subagents/status-interval");
 const POLL_ABORT_KEY = Symbol.for("pi-subagents/poll-abort-controller");
+type RuntimeTool = Parameters<typeof snapshotToolProviders>[0][number];
 
 {
-  const prevInterval = (globalThis as any)[WIDGET_INTERVAL_KEY];
+  const prevInterval = globalState[WIDGET_INTERVAL_KEY];
   if (prevInterval) {
-    clearInterval(prevInterval);
-    (globalThis as any)[WIDGET_INTERVAL_KEY] = null;
+    clearInterval(prevInterval as ReturnType<typeof setInterval>);
+    globalState[WIDGET_INTERVAL_KEY] = null;
   }
-  const prevStatusInterval = (globalThis as any)[STATUS_INTERVAL_KEY];
+  const prevStatusInterval = globalState[STATUS_INTERVAL_KEY];
   if (prevStatusInterval) {
-    clearInterval(prevStatusInterval);
-    (globalThis as any)[STATUS_INTERVAL_KEY] = null;
+    clearInterval(prevStatusInterval as ReturnType<typeof setInterval>);
+    globalState[STATUS_INTERVAL_KEY] = null;
   }
-  const prevAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
+  const prevAbort = globalState[POLL_ABORT_KEY] as AbortController | undefined;
   if (prevAbort) prevAbort.abort();
-  (globalThis as any)[POLL_ABORT_KEY] = new AbortController();
+  globalState[POLL_ABORT_KEY] = new AbortController();
 }
 
 function getModuleAbortSignal(): AbortSignal {
-  return ((globalThis as any)[POLL_ABORT_KEY] as AbortController).signal;
+  return (globalState[POLL_ABORT_KEY] as AbortController).signal;
 }
 
 const SubagentParams = Type.Object({
@@ -281,7 +283,7 @@ function getRegisteredSubagentExtensions(pi: unknown): RegisteredSubagentExtensi
 }
 
 function getRuntimeToolProviders(pi: unknown): ResolvedToolProvider[] {
-  const getAllTools = (pi as { getAllTools?: () => Array<any> } | null)?.getAllTools;
+  const getAllTools = (pi as { getAllTools?: () => Array<RuntimeTool> } | null)?.getAllTools;
   if (typeof getAllTools !== "function") {
     throw new TypeError("This Pi runtime lacks getAllTools(); strict subagent permissions are unavailable.");
   }
@@ -350,7 +352,7 @@ export function registerSubagentExtension(name: string, extensionPath: string, i
   SUBAGENT_EXTENSION_RESOURCES.set(name, { name, path, identity });
 }
 
-(globalThis as any).__pi_interactive_subagents = {
+globalState.__pi_interactive_subagents = {
   registerToolExtension,
   registerSubagentExtension,
 };
@@ -563,7 +565,7 @@ function getDefaultSessionDirFor(cwd: string, agentDir: string): string {
 }
 
 function resolveEffectiveSessionMode(
-  params: Static<typeof SubagentParams>,
+  _params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
 ): SubagentSessionMode {
   return agentDefs?.sessionMode ?? "standalone";
@@ -742,11 +744,11 @@ class ScrollableModelPicker extends Container {
   }
 }
 
-function preferredModelId(agentModel: string | undefined, currentModel: Model<any> | undefined): string | undefined {
+function preferredModelId(agentModel: string | undefined, currentModel: Model<Api> | undefined): string | undefined {
   return agentModel ?? (currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined);
 }
 
-function modelPickerItems(models: Model<any>[], preferredModel?: string): SelectItem[] {
+function modelPickerItems(models: Model<Api>[], preferredModel?: string): SelectItem[] {
   const availableIds = new Set(models.map((model) => `${model.provider}/${model.id}`));
   const items: SelectItem[] = models.map((model) => {
     const id = `${model.provider}/${model.id}`;
@@ -768,14 +770,14 @@ function modelPickerItems(models: Model<any>[], preferredModel?: string): Select
   return items;
 }
 
-function getPiXhighSupport(): ((model: Model<any>) => boolean) | undefined {
+function getPiXhighSupport(): ((model: Model<Api>) => boolean) | undefined {
   const helper = (piAi as unknown as { supportsXhigh?: unknown }).supportsXhigh;
-  return typeof helper === "function" ? (helper as (model: Model<any>) => boolean) : undefined;
+  return typeof helper === "function" ? (helper as (model: Model<Api>) => boolean) : undefined;
 }
 
 function thinkingLevelsForModel(
-  model?: Model<any>,
-  xhighSupport: ((model: Model<any>) => boolean) | null = getPiXhighSupport(),
+  model?: Model<Api>,
+  xhighSupport: ((model: Model<Api>) => boolean) | null | undefined = getPiXhighSupport(),
 ): ThinkingLevel[] {
   if (!model) return [...THINKING_LEVELS];
   if (!model.reasoning) return ["off"];
@@ -783,7 +785,7 @@ function thinkingLevelsForModel(
 }
 
 function thinkingPickerItems(
-  model: Model<any> | undefined,
+  model: Model<Api> | undefined,
   savedThinking?: string,
 ): { items: SelectItem[]; initialValue: string } {
   const levels = thinkingLevelsForModel(model);
@@ -972,7 +974,6 @@ function formatUsageSegments(stats: SessionStats): string[] {
 }
 
 /** ANSI colors for widget status icons (raw, since the widget bypasses theme). */
-const ICON_GREEN = "\x1b[38;2;126;186;103m";
 const ICON_YELLOW = "\x1b[38;2;214;181;94m";
 const ICON_RED = "\x1b[38;2;224;108;117m";
 const ICON_DIM = "\x1b[38;2;128;128;128m";
@@ -985,8 +986,6 @@ function widgetIcon(kind: StatusSnapshot["kind"]): string {
       return `${ICON_YELLOW}⟳${RST}`;
     case "stalled":
       return `${ICON_RED}⟳${RST}`;
-    case "waiting":
-    case "starting":
     default:
       return `${ICON_DIM}○${RST}`;
   }
@@ -1090,6 +1089,31 @@ function resolveResultPresentation(
 /**
  * Result from running a single subagent.
  */
+interface SubagentResultDetails {
+  name?: string;
+  agent?: string;
+  sessionFile?: string;
+  elapsed?: number;
+  exitCode?: number;
+  errorMessage?: string;
+  stats?: SessionStats | null;
+}
+
+interface SubagentToolResultDetails {
+  name?: string;
+  status?: string;
+}
+
+interface SubagentListResultDetails {
+  agents?: ListedAgentDefinition[];
+}
+
+interface SubagentQuestionDetails {
+  name?: string;
+  agent?: string;
+  question?: string;
+}
+
 interface SubagentResult {
   name: string;
   task: string;
@@ -1160,7 +1184,7 @@ const SUBAGENT_SHUTDOWN_TIMEOUT_MS = 10_000;
 // report back. Expose a live count through a process-global symbol that both
 // modules share. (subagent-done.ts reads it; if absent it assumes zero.)
 const RUNNING_CHILDREN_COUNT_KEY = Symbol.for("pi-subagents/running-children-count");
-(globalThis as any)[RUNNING_CHILDREN_COUNT_KEY] = () => runningSubagents.size;
+globalState[RUNNING_CHILDREN_COUNT_KEY] = () => runningSubagents.size;
 
 // ── Widget management ──
 
@@ -1273,7 +1297,7 @@ function borderBottom(width: number): string {
   return `${ACCENT}╰${"─".repeat(inner)}╯${RST}`;
 }
 
-function renderSubagentCall(args: unknown, theme: any): Text {
+function renderSubagentCall(args: unknown, theme: Theme): Text {
   const partialArgs = args as Record<string, unknown>;
   const agentName = typeof partialArgs.agent === "string" && partialArgs.agent ? partialArgs.agent : "";
   const name = typeof partialArgs.name === "string" && partialArgs.name ? partialArgs.name : agentName || "(unnamed)";
@@ -1286,7 +1310,7 @@ function renderSubagentCall(args: unknown, theme: any): Text {
   return new Text(text, 0, 0);
 }
 
-function renderTaskPreview(task: string, theme: any): string {
+function renderTaskPreview(task: string, theme: Theme): string {
   const lines = task.split("\n");
   const firstLine = lines.find((line) => line.trim()) ?? "";
   const preview = firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
@@ -1295,7 +1319,13 @@ function renderTaskPreview(task: string, theme: any): string {
   return text;
 }
 
-function renderSubagentResult(details: any, content: unknown, expanded: boolean, theme: any, width: number): string[] {
+function renderSubagentResult(
+  details: SubagentResultDetails,
+  content: unknown,
+  expanded: boolean,
+  theme: Theme,
+  width: number,
+): string[] {
   const { header, background, stats, elapsed, exitCode } = getSubagentResultHeader(details, theme);
   const summary = cleanSubagentSummary(
     typeof content === "string" ? content : "",
@@ -1324,7 +1354,12 @@ function cleanSubagentSummary(content: string, name: string, elapsed: string, ex
   return summary.startsWith(providerPrefix) ? summary.slice(providerPrefix.length) : summary;
 }
 
-function expandedSubagentResultLines(summary: string, details: any, theme: any, width: number): string[] {
+function expandedSubagentResultLines(
+  summary: string,
+  details: SubagentResultDetails,
+  theme: Theme,
+  width: number,
+): string[] {
   const lines: string[] = [];
   if (summary) lines.push(...summary.split("\n").map((line) => line.slice(0, width - 6)));
   if (details.name || details.sessionFile) {
@@ -1336,7 +1371,7 @@ function expandedSubagentResultLines(summary: string, details: any, theme: any, 
   return lines;
 }
 
-function collapsedSubagentResultLines(summary: string, theme: any, width: number): string[] {
+function collapsedSubagentResultLines(summary: string, theme: Theme, width: number): string[] {
   const lines: string[] = [];
   if (summary) {
     const summaryLines = summary.split("\n");
@@ -1384,14 +1419,14 @@ function updateWidget() {
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
-      (globalThis as any)[WIDGET_INTERVAL_KEY] = null;
+      globalState[WIDGET_INTERVAL_KEY] = null;
     }
     return;
   }
 
   latestCtx.ui.setWidget(
     "subagent-status",
-    (_tui: any, _theme: any) => {
+    (_tui: TUI, _theme: Theme) => {
       return {
         invalidate() {},
         render(width: number) {
@@ -1699,10 +1734,11 @@ function steerSubagent(
   try {
     send(running.surface, flattened);
     return { ok: true };
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       error:
-        `Failed to deliver message to subagent "${running.name}" via tmux: ` + `${error?.message ?? String(error)}`,
+        `Failed to deliver message to subagent "${running.name}" via tmux: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
@@ -1761,7 +1797,7 @@ function startStatusRefresh(pi: ExtensionAPI) {
       if (statusInterval) {
         clearInterval(statusInterval);
         statusInterval = null;
-        (globalThis as any)[STATUS_INTERVAL_KEY] = null;
+        globalState[STATUS_INTERVAL_KEY] = null;
       }
       return;
     }
@@ -1803,7 +1839,7 @@ function startStatusRefresh(pi: ExtensionAPI) {
     }
   }, 1000);
 
-  (globalThis as any)[STATUS_INTERVAL_KEY] = statusInterval;
+  globalState[STATUS_INTERVAL_KEY] = statusInterval;
 }
 
 // Resuming a finished session is always autonomous: the relaunched agent runs
@@ -1870,7 +1906,7 @@ function successfulHeaderDetail(stats: SessionStats | null, elapsed: string, the
   return theme.fg("dim", detail);
 }
 
-function getSubagentResultHeader(details: any, theme: Theme) {
+function getSubagentResultHeader(details: SubagentResultDetails, theme: Theme) {
   const exitCode = details.exitCode ?? 0;
   const errorMessage = typeof details.errorMessage === "string" ? details.errorMessage : "";
   const failed = exitCode !== 0 || !!errorMessage;
@@ -1990,7 +2026,7 @@ function startWidgetRefresh() {
   widgetInterval = setInterval(() => {
     updateWidget();
   }, 1000);
-  (globalThis as any)[WIDGET_INTERVAL_KEY] = widgetInterval;
+  globalState[WIDGET_INTERVAL_KEY] = widgetInterval;
 }
 
 /**
@@ -2564,7 +2600,7 @@ function copyClaudeSession(sentinelFile: string): string | null {
  */
 function deliverPendingQuestion(running: RunningSubagent): void {
   const askFile = `${running.sessionFile}.ask`;
-  let payload: any = null;
+  let payload: unknown = null;
   try {
     if (!existsSync(askFile)) return;
     payload = JSON.parse(readFileSync(askFile, "utf-8"));
@@ -2574,7 +2610,8 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   try {
     unlinkSync(askFile);
   } catch {}
-  if (!payload?.question) return;
+  if (!payload || typeof payload !== "object" || !("question" in payload) || typeof payload.question !== "string")
+    return;
 
   const name = running.name; // unique per session (deduped at spawn) — targets the reply
   const sessionId = existsSync(running.sessionFile) ? getSessionId(running.sessionFile) : null;
@@ -2706,7 +2743,7 @@ async function watchSubagent(running: RunningSubagent, signal: AbortSignal): Pro
     return running.cli === "claude"
       ? watchClaudeSubagent(running, result, elapsed)
       : watchPiSubagent(running, result, elapsed);
-  } catch (err: any) {
+  } catch (err: unknown) {
     try {
       closeSurface(surface);
     } catch {}
@@ -2726,10 +2763,10 @@ async function watchSubagent(running: RunningSubagent, signal: AbortSignal): Pro
     return {
       name,
       task,
-      summary: `Subagent error: ${err?.message ?? String(err)}`,
+      summary: `Subagent error: ${err instanceof Error ? err.message : String(err)}`,
       exitCode: 1,
       elapsed: Math.floor((Date.now() - startTime) / 1000),
-      error: err?.message ?? String(err),
+      error: err instanceof Error ? err.message : String(err),
     };
   }
 }
@@ -3048,9 +3085,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
     // See https://github.com/HazAT/pi-interactive-subagents/issues/5
-    const prevAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
+    const prevAbort = globalState[POLL_ABORT_KEY] as AbortController | undefined;
     if (!prevAbort || prevAbort.signal.aborted) {
-      (globalThis as any)[POLL_ABORT_KEY] = new AbortController();
+      globalState[POLL_ABORT_KEY] = new AbortController();
     }
   });
 
@@ -3059,14 +3096,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
-      (globalThis as any)[WIDGET_INTERVAL_KEY] = null;
+      globalState[WIDGET_INTERVAL_KEY] = null;
     }
     if (statusInterval) {
       clearInterval(statusInterval);
       statusInterval = null;
-      (globalThis as any)[STATUS_INTERVAL_KEY] = null;
+      globalState[STATUS_INTERVAL_KEY] = null;
     }
-    const moduleAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
+    const moduleAbort = globalState[POLL_ABORT_KEY] as AbortController | undefined;
     if (moduleAbort) moduleAbort.abort();
     for (const [_id, agent] of runningSubagents) {
       agent.abortController?.abort();
@@ -3155,7 +3192,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       // Launch the subagent (creates pane, sends command). Release the name
       // reservation once it registers in runningSubagents (or launch fails) —
       // from then on uniqueRunningName tracks it via the running map.
-      let running;
+      let running: RunningSubagent;
       try {
         running = await launchSubagent(params, ctx);
       } finally {
@@ -3259,7 +3296,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
+      const details = result.details as SubagentToolResultDetails;
       const name = details?.name ?? "(unnamed)";
 
       // "Started" result — tool returned immediately
@@ -3272,7 +3309,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
 
       // Fallback (shouldn't happen)
-      const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+      const firstContent = result.content[0];
+      const text = firstContent?.type === "text" ? firstContent.text : "";
       return new Text(theme.fg("dim", text), 0, 0);
     },
   });
@@ -3315,12 +3353,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
+      const details = result.details as SubagentListResultDetails;
       const agents = details?.agents ?? [];
       if (agents.length === 0) {
         return new Text(theme.fg("dim", "No subagent definitions found."), 0, 0);
       }
-      const lines = agents.map((a: any) => {
+      const lines = agents.map((a) => {
         const badge = a.source === "project" ? theme.fg("accent", " (project)") : "";
         const desc = a.description ? theme.fg("dim", ` — ${a.description}`) : "";
         const model = theme.fg("dim", ` [${a.model ?? "Pi default"}]`);
@@ -3364,7 +3402,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
+      const details = result.details as SubagentToolResultDetails;
 
       if (details?.status === "steered") {
         return new Text(
@@ -3389,7 +3427,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
 
       // Fallback / error
-      const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+      const firstContent = result.content[0];
+      const text = firstContent?.type === "text" ? firstContent.text : "";
       return new Text(theme.fg("dim", text), 0, 0);
     },
 
@@ -3609,7 +3648,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // ── subagent_result message renderer ──
   pi.registerMessageRenderer("subagent_result", (message, options, theme) => {
-    const details = message.details as any;
+    const details = message.details as SubagentResultDetails | undefined;
     if (!details) return undefined;
 
     return {
@@ -3621,7 +3660,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // ── subagent_status message renderer ──
   pi.registerMessageRenderer("subagent_status", (message, options, theme) => {
-    const details = message.details as any;
+    const details = message.details as Record<string, unknown>;
     const lines = Array.isArray(details?.lines) ? details.lines : [];
     const overflow = typeof details?.overflow === "number" ? details.overflow : 0;
     if (lines.length === 0 && overflow === 0) return undefined;
@@ -3650,7 +3689,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // ── subagent_question message renderer ──
   pi.registerMessageRenderer("subagent_question", (message, options, theme) => {
-    const details = message.details as any;
+    const details = message.details as SubagentQuestionDetails | undefined;
     if (!details) return undefined;
 
     return {
