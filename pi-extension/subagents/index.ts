@@ -70,6 +70,7 @@ import {
   type SubagentLoadout,
 } from "./session.ts";
 import { resolveMcpServerIdentities, type McpServerIdentity } from "./mcp-identity.ts";
+import { completionTurnGuidance, publishSubagentCompletion } from "./completion.ts";
 import {
   appendExplicitLoadoutArgs,
   createExplicitLoadoutSnapshot,
@@ -1061,12 +1062,15 @@ function removeFirstLiteral(value: string, literal: string): string {
 function resolveResultPresentation(
   result: Pick<SubagentResult, "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage">,
   name: string,
+  pendingNames: readonly string[] = Array.from(runningSubagents.values(), (running) => running.name),
 ): string {
-  // Completion is a notification, not a request to acknowledge: messaging a
-  // finished subagent resumes it and would produce another completion.
+  // Only child-directed acknowledgements cause loops; the parent should still
+  // continue its task and report results to the user.
   const sessionRef =
-    `\n\nNo reply is needed. Only use subagent_message if you have additional work. ` +
-    `Do not send acknowledgements or closure messages; they resume the finished subagent. ` +
+    `\n\nDo not acknowledge this completion via subagent_message; that resumes the finished subagent. ` +
+    `Only use subagent_message if you have additional work. ` +
+    `Continue the parent task and summarize results for the user when ready. ` +
+    `${completionTurnGuidance(pendingNames)} ` +
     `For additional work: subagent_message({ name: "${name}", message: "…" })`;
 
   if (result.errorMessage) {
@@ -1350,7 +1354,10 @@ function renderSubagentResult(
 }
 
 function cleanSubagentSummary(content: string, name: string, elapsed: string, exitCode: number): string {
-  let summary = content.replace(/\n\n(?:Follow up with subagent_message|No reply is needed\.)[\s\S]+$/, "");
+  let summary = content.replace(
+    /\n\n(?:Follow up with subagent_message|No reply is needed\.|Do not acknowledge this completion via subagent_message;)[\s\S]+$/,
+    "",
+  );
   summary = removeFirstLiteral(summary, `Sub-agent "${name}" completed (${elapsed}).\n\n`);
   summary = removeFirstLiteral(summary, `Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`);
   const providerPrefix = `Sub-agent "${name}" failed after ${elapsed} (provider/agent error — auto-retry exhausted).\n\n`;
@@ -3009,7 +3016,8 @@ function registerResumeWatcher(
         { ...result, summary, sessionFile: sessionPath, sessionId: resumedSessionId },
         name,
       );
-      pi.sendMessage(
+      publishSubagentCompletion(
+        pi,
         {
           customType: "subagent_result",
           content: presentation,
@@ -3025,19 +3033,20 @@ function registerResumeWatcher(
             ...(result.error ? { error: result.error } : {}),
           },
         },
-        { triggerTurn: true, deliverAs: "steer" },
+        Array.from(runningSubagents.values(), (child) => child.name),
       );
     })
     .catch((err) => {
       updateWidget();
-      pi.sendMessage(
+      publishSubagentCompletion(
+        pi,
         {
           customType: "subagent_result",
           content: `Resume error: ${err?.message ?? String(err)}`,
           display: true,
           details: { name, error: err?.message },
         },
-        { triggerTurn: true, deliverAs: "steer" },
+        Array.from(runningSubagents.values(), (child) => child.name),
       );
     });
 }
@@ -3129,14 +3138,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
       "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
       "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). " +
+      "Do not wait in reasoning for completion or message a child just to check or hurry it. The harness will wake you with the result when it is ready.",
     promptSnippet:
       "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
       "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
       "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
       "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
       "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). " +
+      "Do not wait in reasoning for completion or message a child just to check or hurry it. The harness will wake you with the result when it is ready.",
     parameters: SubagentParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -3236,7 +3247,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
           const presentation = resolveResultPresentation(result, running.name);
 
-          pi.sendMessage(
+          publishSubagentCompletion(
+            pi,
             {
               customType: "subagent_result",
               content: presentation,
@@ -3254,19 +3266,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 ...(result.stats ? { stats: result.stats } : {}),
               },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            Array.from(runningSubagents.values(), (child) => child.name),
           );
         })
         .catch((err) => {
           updateWidget();
-          pi.sendMessage(
+          publishSubagentCompletion(
+            pi,
             {
               customType: "subagent_result",
               content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}`,
               display: true,
               details: { name: running.name, task: running.task, error: err?.message },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            Array.from(runningSubagents.values(), (child) => child.name),
           );
         });
 
@@ -3279,7 +3292,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               `Sub-agent "${params.name}" launched and is now running in the background. ` +
               `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
               `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
-              `Until then, move on to other work or tell the user you're waiting.`,
+              `Until then, work on independent tasks or briefly report progress and end this turn immediately. ` +
+              `Do not wait in reasoning or message a child just to check or hurry it.`,
           },
         ],
         details: {
@@ -3379,7 +3393,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       "Send a message to a subagent by name. Names are unique within your session and persist after a subagent finishes, " +
       "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
       "if it has finished, your message resumes that session and continues it. " +
-      "Completion notifications need no reply. Only message a finished subagent for additional work, never acknowledgements or closure messages. " +
+      "Do not acknowledge completion via subagent_message; that resumes the finished subagent. " +
+      "Only message a finished subagent for additional work, never acknowledgements or closure messages. " +
+      "Continue the parent task and summarize results for the user when ready. " +
       "`name` and `message` are both required. " +
       "Steering a running subagent returns immediately with a local acknowledgement and does NOT, by itself, emit a new result. " +
       "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +
@@ -3388,7 +3404,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     promptSnippet:
       "Message a subagent by name: steers it if running, resumes it if finished (same name either way). " +
       "`name` and `message` are required. Steering returns immediately; resuming delivers its result later as a steer message. " +
-      "Do not poll or fabricate results. Completion notifications need no reply; do not send acknowledgements or closure messages.",
+      "Do not poll or fabricate results. Do not acknowledge completion via subagent_message; that resumes the finished subagent. " +
+      "Continue the parent task and summarize results for the user when ready.",
     parameters: Type.Object({
       name: Type.String({
         description:
