@@ -83,7 +83,11 @@ import {
   type RegisteredSubagentExtension,
   type ResolvedToolProvider,
 } from "./loadout.ts";
-import { buildStartupDeadlineCommand, EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS } from "./startup.ts";
+import {
+  buildProcessExitCommand,
+  buildStartupDeadlineCommand,
+  EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
+} from "./startup.ts";
 import {
   type StatusSnapshot,
   type SubagentStatusState,
@@ -1099,6 +1103,8 @@ interface SubagentResult {
   error?: string;
   /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
   errorMessage?: string;
+  shutdownRequestedAt?: number;
+  shutdownElapsedMs?: number;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
 }
@@ -1145,6 +1151,7 @@ interface RunningSubagent {
 
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
+const SUBAGENT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 // When this extension is loaded inside a subagent that itself spawns children
 // (e.g. a worker delegating to scout/researcher), `subagent-done.ts` runs in the
@@ -1842,6 +1849,7 @@ export const __test__ = {
   handleSubagentSteer,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  clearSubagentExitSignals,
   runningSubagents,
   formatElapsed,
   formatTokens,
@@ -2284,6 +2292,16 @@ function launchClaudeSubagent(
   return running;
 }
 
+function clearSubagentExitSignals(sessionFile: string): void {
+  for (const suffix of [".exit", ".process-exit", ".shutdown-request"]) {
+    try {
+      unlinkSync(`${sessionFile}${suffix}`);
+    } catch {
+      // Missing or inaccessible stale signals must not prevent a new launch.
+    }
+  }
+}
+
 function launchPiSubagent(
   params: typeof SubagentParams.static,
   options: SubagentLaunchOptions,
@@ -2326,6 +2344,7 @@ function launchPiSubagent(
     ...buildPiPromptArgs({ effectiveSkills, taskDelivery: launchBehavior.taskDelivery, taskArg }).map(shellEscape),
   );
   const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
+  clearSubagentExitSignals(subagentSessionFile);
   const command = buildPiSubagentCommand(
     parts,
     cdPrefix,
@@ -2471,10 +2490,17 @@ function buildPiSubagentCommand(
         command: `${cdPrefix}${envPrefix}exec ${parts.join(" ")}`,
         readyFile: startupReadyFile,
         exitFile: `${subagentSessionFile}.exit`,
+        processExitFile: `${subagentSessionFile}.process-exit`,
+        shutdownRequestFile: `${subagentSessionFile}.shutdown-request`,
         timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
         escape: shellEscape,
       })
-    : `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
+    : buildProcessExitCommand(
+        piCommand,
+        `${subagentSessionFile}.process-exit`,
+        shellEscape,
+        `${subagentSessionFile}.shutdown-request`,
+      );
 }
 
 function sendPiSubagentCommand(
@@ -2612,12 +2638,33 @@ function watchClaudeSubagent(running: RunningSubagent, result: PollResult, elaps
   };
 }
 
+function shutdownTimeoutSummary(
+  running: RunningSubagent,
+  result: Pick<PollResult, "shutdownRequestedAt" | "shutdownElapsedMs">,
+): string {
+  const requestedAt = result.shutdownRequestedAt ?? running.startTime;
+  const activity = running.activity
+    ? `${running.activity.latestEvent}/${running.activity.phase} at ${new Date(running.activity.updatedAt).toISOString()}`
+    : "unavailable";
+  return (
+    `Subagent process did not exit within ${Math.ceil((result.shutdownElapsedMs ?? SUBAGENT_SHUTDOWN_TIMEOUT_MS) / 1000)} seconds ` +
+    `of its shutdown request (${new Date(requestedAt).toISOString()}). ` +
+    `Last activity: ${activity}. No process-exit signal was observed.`
+  );
+}
+
 function watchPiSubagent(running: RunningSubagent, result: PollResult, elapsed: number): SubagentResult {
   const { name, task, surface, sessionFile } = running;
-  const summary = existsSync(sessionFile)
-    ? (findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
-      fallbackSubagentSummary(result.errorMessage, result.exitCode))
-    : fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  let summary: string;
+  if (result.error === "shutdown-timeout") {
+    summary = shutdownTimeoutSummary(running, result);
+  } else if (existsSync(sessionFile)) {
+    summary =
+      findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
+      fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  } else {
+    summary = fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  }
   const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
   const sessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
   closeSurface(surface);
@@ -2631,6 +2678,9 @@ function watchPiSubagent(running: RunningSubagent, result: PollResult, elapsed: 
     exitCode: result.exitCode,
     elapsed,
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.shutdownRequestedAt != null ? { shutdownRequestedAt: result.shutdownRequestedAt } : {}),
+    ...(result.shutdownElapsedMs != null ? { shutdownElapsedMs: result.shutdownElapsedMs } : {}),
     ...(stats ? { stats } : {}),
   };
 }
@@ -2642,6 +2692,9 @@ async function watchSubagent(running: RunningSubagent, signal: AbortSignal): Pro
     const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
       interval: 1000,
       sessionFile,
+      processExitFile: running.cli === "claude" ? undefined : `${sessionFile}.process-exit`,
+      shutdownRequestFile: running.cli === "claude" ? undefined : `${sessionFile}.shutdown-request`,
+      shutdownTimeoutMs: running.cli === "claude" ? undefined : SUBAGENT_SHUTDOWN_TIMEOUT_MS,
       sentinelFile: running.sentinelFile,
       onTick() {
         observeRunningSubagent(running);
@@ -2844,11 +2897,18 @@ function buildResumeCommand(input: {
       command: `${resumeCdPrefix}${resumeEnvPrefix}exec ${parts.join(" ")}`,
       readyFile: resumeReadyFile,
       exitFile: `${sessionPath}.exit`,
+      processExitFile: `${sessionPath}.process-exit`,
+      shutdownRequestFile: `${sessionPath}.shutdown-request`,
       timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
       escape: shellEscape,
     });
   }
-  return `${command}; echo '__SUBAGENT_DONE_'$?'__'`;
+  return buildProcessExitCommand(
+    command,
+    `${sessionPath}.process-exit`,
+    shellEscape,
+    `${sessionPath}.shutdown-request`,
+  );
 }
 
 function buildResumeEnvironment(input: {
@@ -2896,7 +2956,10 @@ function registerResumeWatcher(
     .then((result) => {
       updateWidget();
       const allEntries = getNewEntries(sessionPath, entryCountBefore);
-      let summary = findLastAssistantMessage(allEntries);
+      let summary =
+        result.error === "shutdown-timeout"
+          ? shutdownTimeoutSummary(running, result)
+          : findLastAssistantMessage(allEntries);
       if (!summary) {
         if (result.errorMessage) summary = `Subagent error: ${result.errorMessage}`;
         else if (result.exitCode !== 0) summary = `Resumed session exited with code ${result.exitCode}`;
@@ -2919,6 +2982,7 @@ function registerResumeWatcher(
             sessionFile: sessionPath,
             sessionId: resumedSessionId,
             ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+            ...(result.error ? { error: result.error } : {}),
           },
         },
         { triggerTurn: true, deliverAs: "steer" },
@@ -3422,6 +3486,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       // operate where they did before.
       const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
+      clearSubagentExitSignals(sessionPath);
       const command = buildResumeCommand({
         parts,
         loadout,
