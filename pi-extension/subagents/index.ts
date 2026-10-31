@@ -2655,13 +2655,16 @@ function shutdownTimeoutSummary(
 
 function watchPiSubagent(running: RunningSubagent, result: PollResult, elapsed: number): SubagentResult {
   const { name, task, surface, sessionFile } = running;
-  const summary =
-    result.error === "shutdown-timeout"
-      ? shutdownTimeoutSummary(running, result)
-      : existsSync(sessionFile)
-        ? (findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
-          fallbackSubagentSummary(result.errorMessage, result.exitCode))
-        : fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  let summary: string;
+  if (result.error === "shutdown-timeout") {
+    summary = shutdownTimeoutSummary(running, result);
+  } else if (existsSync(sessionFile)) {
+    summary =
+      findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
+      fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  } else {
+    summary = fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  }
   const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
   const sessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
   closeSurface(surface);

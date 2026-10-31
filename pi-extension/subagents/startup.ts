@@ -29,7 +29,7 @@ export function buildProcessExitCommand(
       : 'rm -f "$process_exit_file" "$process_exit_tmp"',
     `bash -c ${shellQuote(command)} <&0`,
     "status=$?",
-    `printf '{"type":"process_exit","exitCode":%s}\\n' "$status" > "$process_exit_tmp"`,
+    String.raw`printf '{"type":"process_exit","exitCode":%s}\n' "$status" > "$process_exit_tmp"`,
     'mv -f "$process_exit_tmp" "$process_exit_file"',
     "echo '__SUBAGENT_DONE_'$status'__'",
   ].join("\n");
@@ -78,7 +78,7 @@ export function buildStartupDeadlineCommand(options: StartupDeadlineCommandOptio
     "fi",
     'wait "$child_pid"',
     "status=$?",
-    `printf '{"type":"process_exit","exitCode":%s}\\n' "$status" > "$process_exit_tmp"`,
+    String.raw`printf '{"type":"process_exit","exitCode":%s}\n' "$status" > "$process_exit_tmp"`,
     'mv -f "$process_exit_tmp" "$process_exit_file"',
     "echo '__SUBAGENT_DONE_'$status'__'",
   ].join("\n");
