@@ -4621,6 +4621,24 @@ describe("subagent interruption", () => {
     }
   });
 
+  it("makes completion notifications terminal unless additional work is needed", () => {
+    for (const result of [
+      { exitCode: 0, summary: "Done." },
+      { exitCode: 1, summary: "Failed." },
+      { exitCode: 1, summary: "Failed.", errorMessage: "Provider unavailable" },
+    ]) {
+      const presentation = subagentsModule.__test__.resolveResultPresentation(
+        { ...result, elapsed: 1, sessionFile: "/tmp/subagent.jsonl" },
+        "Worker",
+      );
+      assert.match(presentation, /No reply is needed/);
+      assert.match(presentation, /Only use subagent_message if you have additional work/);
+      assert.match(presentation, /Do not send acknowledgements or closure messages/);
+      assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
+      assert.doesNotMatch(presentation, /Follow up with/);
+    }
+  });
+
   it("formats exit code 130 as an ordinary failure", () => {
     const testApi = testHelpers;
     const presentation = testApi.resolveResultPresentation(
