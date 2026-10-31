@@ -1103,6 +1103,8 @@ interface SubagentResult {
   error?: string;
   /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
   errorMessage?: string;
+  shutdownRequestedAt?: number;
+  shutdownElapsedMs?: number;
   /** Aggregate usage/model/tool stats parsed from the completed session file. */
   stats?: SessionStats;
 }
@@ -2636,12 +2638,30 @@ function watchClaudeSubagent(running: RunningSubagent, result: PollResult, elaps
   };
 }
 
+function shutdownTimeoutSummary(
+  running: RunningSubagent,
+  result: Pick<PollResult, "shutdownRequestedAt" | "shutdownElapsedMs">,
+): string {
+  const requestedAt = result.shutdownRequestedAt ?? running.startTime;
+  const activity = running.activity
+    ? `${running.activity.latestEvent}/${running.activity.phase} at ${new Date(running.activity.updatedAt).toISOString()}`
+    : "unavailable";
+  return (
+    `Subagent process did not exit within ${Math.ceil((result.shutdownElapsedMs ?? SUBAGENT_SHUTDOWN_TIMEOUT_MS) / 1000)} seconds ` +
+    `of its shutdown request (${new Date(requestedAt).toISOString()}). ` +
+    `Last activity: ${activity}. No process-exit signal was observed.`
+  );
+}
+
 function watchPiSubagent(running: RunningSubagent, result: PollResult, elapsed: number): SubagentResult {
   const { name, task, surface, sessionFile } = running;
-  const summary = existsSync(sessionFile)
-    ? (findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
-      fallbackSubagentSummary(result.errorMessage, result.exitCode))
-    : fallbackSubagentSummary(result.errorMessage, result.exitCode);
+  const summary =
+    result.error === "shutdown-timeout"
+      ? shutdownTimeoutSummary(running, result)
+      : existsSync(sessionFile)
+        ? (findLastAssistantMessage(getNewEntries(sessionFile, 0)) ??
+          fallbackSubagentSummary(result.errorMessage, result.exitCode))
+        : fallbackSubagentSummary(result.errorMessage, result.exitCode);
   const stats = existsSync(sessionFile) ? summarizeSessionStats(sessionFile) : null;
   const sessionId = existsSync(sessionFile) ? getSessionId(sessionFile) : null;
   closeSurface(surface);
@@ -2655,6 +2675,9 @@ function watchPiSubagent(running: RunningSubagent, result: PollResult, elapsed: 
     exitCode: result.exitCode,
     elapsed,
     ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.shutdownRequestedAt != null ? { shutdownRequestedAt: result.shutdownRequestedAt } : {}),
+    ...(result.shutdownElapsedMs != null ? { shutdownElapsedMs: result.shutdownElapsedMs } : {}),
     ...(stats ? { stats } : {}),
   };
 }
@@ -2930,7 +2953,10 @@ function registerResumeWatcher(
     .then((result) => {
       updateWidget();
       const allEntries = getNewEntries(sessionPath, entryCountBefore);
-      let summary = findLastAssistantMessage(allEntries);
+      let summary =
+        result.error === "shutdown-timeout"
+          ? shutdownTimeoutSummary(running, result)
+          : findLastAssistantMessage(allEntries);
       if (!summary) {
         if (result.errorMessage) summary = `Subagent error: ${result.errorMessage}`;
         else if (result.exitCode !== 0) summary = `Resumed session exited with code ${result.exitCode}`;
@@ -2953,6 +2979,7 @@ function registerResumeWatcher(
             sessionFile: sessionPath,
             sessionId: resumedSessionId,
             ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+            ...(result.error ? { error: result.error } : {}),
           },
         },
         { triggerTurn: true, deliverAs: "steer" },

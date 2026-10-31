@@ -276,6 +276,13 @@ export default function subagentDone(pi: ExtensionAPI) {
       }
 
       recorder.agentEndDone();
+      if (sessionFile) {
+        try {
+          writeSubagentShutdownRequest(sessionFile);
+        } catch {
+          // Shutdown remains best-effort even if the watcher signal cannot be persisted.
+        }
+      }
       ctx.shutdown();
       return;
     }

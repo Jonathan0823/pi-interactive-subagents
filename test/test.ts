@@ -3128,6 +3128,7 @@ describe("subagent-done.ts", () => {
           },
         );
         assert.equal(shutdown, true, "reply consumed mid-run → agent_end should exit, not park");
+        assert.ok(existsSync(`${join(dir, "s.jsonl")}.shutdown-request`));
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
