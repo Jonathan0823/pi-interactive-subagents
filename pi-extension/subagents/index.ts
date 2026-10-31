@@ -1063,9 +1063,12 @@ function resolveResultPresentation(
   result: Pick<SubagentResult, "exitCode" | "elapsed" | "summary" | "sessionFile" | "sessionId" | "errorMessage">,
   name: string,
 ): string {
-  // Name is the persistent handle: the same name steers a running subagent or
-  // resumes a finished one, so follow-ups always reference it.
-  const sessionRef = `\n\nFollow up with subagent_message({ name: "${name}", message: "…" })`;
+  // Completion is a notification, not a request to acknowledge: messaging a
+  // finished subagent resumes it and would produce another completion.
+  const sessionRef =
+    `\n\nNo reply is needed. Only use subagent_message if you have additional work. ` +
+    `Do not send acknowledgements or closure messages; they resume the finished subagent. ` +
+    `For additional work: subagent_message({ name: "${name}", message: "…" })`;
 
   if (result.errorMessage) {
     // Auto-retry exhausted or other agent-loop error. The subagent did not
@@ -1317,7 +1320,7 @@ function renderSubagentResult(details: any, content: unknown, expanded: boolean,
 }
 
 function cleanSubagentSummary(content: string, name: string, elapsed: string, exitCode: number): string {
-  let summary = content.replace(/\n\nFollow up with subagent_message[\s\S]+$/, "");
+  let summary = content.replace(/\n\n(?:Follow up with subagent_message|No reply is needed\.)[\s\S]+$/, "");
   summary = removeFirstLiteral(summary, `Sub-agent "${name}" completed (${elapsed}).\n\n`);
   summary = removeFirstLiteral(summary, `Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`);
   const providerPrefix = `Sub-agent "${name}" failed after ${elapsed} (provider/agent error — auto-retry exhausted).\n\n`;
@@ -3338,6 +3341,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       "Send a message to a subagent by name. Names are unique within your session and persist after a subagent finishes, " +
       "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +
       "if it has finished, your message resumes that session and continues it. " +
+      "Completion notifications need no reply. Only message a finished subagent for additional work, never acknowledgements or closure messages. " +
       "`name` and `message` are both required. " +
       "Steering a running subagent returns immediately with a local acknowledgement and does NOT, by itself, emit a new result. " +
       "Resuming is a fire-and-forget async call: when the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up. " +
@@ -3346,7 +3350,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     promptSnippet:
       "Message a subagent by name: steers it if running, resumes it if finished (same name either way). " +
       "`name` and `message` are required. Steering returns immediately; resuming delivers its result later as a steer message. " +
-      "Do not poll or fabricate results.",
+      "Do not poll or fabricate results. Completion notifications need no reply; do not send acknowledgements or closure messages.",
     parameters: Type.Object({
       name: Type.String({
         description:
