@@ -39,3 +39,11 @@ jobs:
 
       - name: No-auth loadout CLI tests
         run: npm run test:loadout:cli
+
+      - name: Install Pi runtime for completion delivery tests
+        run: npm install --prefix "$RUNNER_TEMP/pi-runtime" --no-package-lock --ignore-scripts @earendil-works/pi-coding-agent@1.4.0
+
+      - name: No-auth completion delivery CLI tests
+        env:
+          PI_TEST_PI_EXECUTABLE: ${{ runner.temp }}/pi-runtime/node_modules/.bin/pi
+        run: npm run test:completion:cli

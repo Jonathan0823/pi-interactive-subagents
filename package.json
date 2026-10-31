@@ -19,6 +19,7 @@
     "test": "node --test test/test.ts",
     "test:coverage": "c8 --all --include='pi-extension/**/*.ts' --reporter=text --reporter=lcov node --test test/test.ts",
     "test:loadout:cli": "node --test test/integration/explicit-loadout-cli.test.ts",
+    "test:completion:cli": "node --test test/integration/completion-delivery-cli.test.ts",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts"
   },
   "peerDependencies": {

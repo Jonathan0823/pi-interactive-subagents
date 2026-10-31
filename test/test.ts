@@ -35,6 +35,7 @@ import {
 } from "../pi-extension/subagents/session.ts";
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import { publishSubagentCompletion } from "../pi-extension/subagents/completion.ts";
 import { buildProcessExitCommand, buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
 import {
   appendExplicitLoadoutArgs,
@@ -148,6 +149,7 @@ type TestToolParameter = { description?: string; type?: string };
 type TestRegisteredTool = {
   name: string;
   description: string;
+  promptSnippet?: string;
   parameters: { properties: Record<string, TestToolParameter>; required?: string[] };
   execute(
     toolCallId?: string,
@@ -4204,6 +4206,16 @@ describe("tool registration", () => {
     assert.equal(props.autoExit, undefined, "autoExit knob should be removed");
   });
 
+  it("tells the parent to yield instead of waiting in reasoning after spawning", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    subagentsModule.default(api);
+    const tool = findRegisteredTool(registeredTools, "subagent");
+    for (const guidance of [tool.description, tool.promptSnippet ?? ""]) {
+      assert.match(guidance, /Do not wait in reasoning/);
+      assert.match(guidance, /end your turn immediately/);
+    }
+  });
+
   it("no longer registers subagent_interrupt or subagent_resume", () => {
     const { api, registeredTools } = createMockExtensionApi();
     subagentsModule.default(api);
@@ -4621,7 +4633,7 @@ describe("subagent interruption", () => {
     }
   });
 
-  it("makes completion notifications terminal unless additional work is needed", () => {
+  it("prevents child acknowledgement loops while preserving parent summaries", () => {
     for (const result of [
       { exitCode: 0, summary: "Done." },
       { exitCode: 1, summary: "Failed." },
@@ -4631,11 +4643,37 @@ describe("subagent interruption", () => {
         { ...result, elapsed: 1, sessionFile: "/tmp/subagent.jsonl" },
         "Worker",
       );
-      assert.match(presentation, /No reply is needed/);
+      assert.match(presentation, /Do not acknowledge this completion via subagent_message/);
       assert.match(presentation, /Only use subagent_message if you have additional work/);
-      assert.match(presentation, /Do not send acknowledgements or closure messages/);
+      assert.match(presentation, /Continue the parent task and summarize results for the user when ready/);
+      assert.doesNotMatch(presentation, /No reply is needed|Completion notifications need no reply/);
       assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
       assert.doesNotMatch(presentation, /Follow up with/);
+    }
+  });
+
+  it("yields promptly with pending children and summarizes when the last child finishes", () => {
+    const result = { exitCode: 0, elapsed: 1, summary: "FFF tools passed.", sessionFile: "/tmp/scout.jsonl" };
+    const pending = subagentsModule.__test__.resolveResultPresentation(result, "Scout", ["Worker"]);
+    assert.match(pending, /1 subagent still running: Worker/);
+    assert.match(pending, /end this turn immediately/);
+    assert.match(pending, /Do not wait in reasoning/);
+    assert.match(pending, /Do not message a child just to check/);
+
+    const complete = subagentsModule.__test__.resolveResultPresentation(result, "Worker", []);
+    assert.match(complete, /No subagents remain running/);
+    assert.match(complete, /Summarize the completed results for the user now/);
+    assert.doesNotMatch(complete, /end this turn immediately/);
+  });
+
+  it("scopes message-tool completion guidance to child messages, not user summaries", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    subagentsModule.default(api);
+    const tool = findRegisteredTool(registeredTools, "subagent_message");
+    for (const guidance of [tool.description, tool.promptSnippet ?? ""]) {
+      assert.match(guidance, /Do not acknowledge completion via subagent_message/);
+      assert.match(guidance, /Continue the parent task and summarize results for the user when ready/);
+      assert.doesNotMatch(guidance, /No reply is needed|Completion notifications need no reply/);
     }
   });
 
@@ -4684,6 +4722,53 @@ describe("subagent interruption", () => {
     assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
     assert.doesNotMatch(presentation, /Session id:/);
     assert.doesNotMatch(presentation, /ignored when errorMessage is present/);
+  });
+});
+
+describe("subagent completion publication", () => {
+  it("keeps the published result when the wake-up cannot be sent", () => {
+    const published: Array<Parameters<ExtensionAPI["sendMessage"]>[0]> = [];
+    const result = { customType: "subagent_result", content: "Both FFF tools passed.", display: true };
+    const pi = {
+      sendMessage(
+        message: Parameters<ExtensionAPI["sendMessage"]>[0],
+        options?: Parameters<ExtensionAPI["sendMessage"]>[1],
+      ) {
+        if (options?.triggerTurn) throw new Error("wake-up rejected");
+        published.push(message);
+      },
+    };
+    assert.doesNotThrow(() => publishSubagentCompletion(pi, result, []));
+    assert.deepEqual(published, [result]);
+  });
+});
+
+describe("subagent result renderer", () => {
+  it("hides completion guidance from displayed summaries, including historical footers", () => {
+    const { api, registeredMessageRenderers } = createMockExtensionApi();
+    subagentsModule.default(api);
+    const entry = registeredMessageRenderers.find((item) => item.name === "subagent_result");
+    assert.ok(entry);
+    const current = subagentsModule.__test__.resolveResultPresentation(
+      { exitCode: 0, elapsed: 1, summary: "Both FFF tools succeeded.", sessionFile: "/tmp/worker.jsonl" },
+      "Worker",
+    );
+    const header = 'Sub-agent "Worker" completed (1s).\n\nBoth FFF tools succeeded.';
+    for (const content of [
+      current,
+      `${header}\n\nNo reply is needed. Only use subagent_message if you have additional work.`,
+      `${header}\n\nFollow up with subagent_message for additional work.`,
+    ]) {
+      const rendered = entry.renderer(
+        { customType: "subagent_result", content, details: { name: "Worker", exitCode: 0, elapsed: 1 } },
+        { expanded: true },
+        { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text },
+      );
+      assert.ok(rendered);
+      const output = rendered.render(120).join("\n");
+      assert.match(output, /Both FFF tools succeeded/);
+      assert.doesNotMatch(output, /Do not acknowledge|Continue the parent task|No reply is needed|Follow up with/);
+    }
   });
 });
 
