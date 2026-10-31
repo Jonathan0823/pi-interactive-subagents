@@ -15,7 +15,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
 export function shouldBlockSubagentInputForLoadout(state: string | undefined, initialInputConsumed: boolean): boolean {
@@ -25,6 +25,13 @@ export function shouldBlockSubagentInputForLoadout(state: string | undefined, in
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
+}
+
+export function writeSubagentShutdownRequest(sessionFile: string, requestedAt = Date.now()): void {
+  const requestFile = `${sessionFile}.shutdown-request`;
+  const tempFile = `${requestFile}.${process.pid}.tmp`;
+  writeFileSync(tempFile, `${JSON.stringify({ requestedAt })}\n`, { mode: 0o600 });
+  renameSync(tempFile, requestFile);
 }
 
 /**

@@ -247,17 +247,21 @@ export function closeSurface(surface: string): void {
 export interface PollResult {
   /** How the subagent exited */
   reason: "done" | "sentinel" | "error";
-  /** Shell exit code (from sentinel). 0 for file-based exits. */
+  /** Child process exit code. */
   exitCode: number;
   /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
   errorMessage?: string;
+  /** Non-provider watcher failure that must not trigger configured model fallback. */
+  error?: string;
+  shutdownRequestedAt?: number;
+  shutdownElapsedMs?: number;
 }
 
 /**
  * Interpret an `.exit` sidecar payload (written by the error path in
  * subagent-done.ts). Centralized so both the fast and slow paths in
- * pollForExit decode the payload the same way. Clean completions write no
- * sidecar and are detected via the terminal sentinel instead.
+ * pollForExit decode the payload the same way. Clean completions do not write
+ * this provider-error sidecar; ordinary completion uses a separate durable process-exit sidecar.
  *
  * Note: ask_question does NOT write a `.exit` sidecar — it keeps the session
  * open and signals the parent via a separate `.ask` file (see deliverPendingQuestion).
@@ -273,12 +277,11 @@ function interpretExitSidecar(data: unknown): PollResult {
   return { reason: "done", exitCode: 0 };
 }
 
-export const __pollForExitTest__ = { interpretExitSidecar };
+export const __pollForExitTest__ = { interpretExitSidecar, readProcessExitSidecar, checkShutdownRequestTimeout };
 
 /**
- * Poll until the subagent exits. Checks for a `.exit` sidecar file first
- * (written by the error path), falling back to the terminal sentinel for
- * clean-completion and crash detection.
+ * Poll until the subagent exits. Checks provider-error and process-exit
+ * sidecars first, using the terminal sentinel as a compatibility fallback.
  */
 function readExitSidecar(sessionFile?: string): PollResult | undefined {
   if (!sessionFile) return undefined;
@@ -288,6 +291,43 @@ function readExitSidecar(sessionFile?: string): PollResult | undefined {
     const data = JSON.parse(readFileSync(exitFile, "utf-8"));
     rmSync(exitFile, { force: true });
     return interpretExitSidecar(data);
+  } catch {
+    return undefined;
+  }
+}
+
+function checkShutdownRequestTimeout(
+  requestFile: string | undefined,
+  timeoutMs: number | undefined,
+  now = Date.now(),
+  processExitFile?: string,
+): PollResult | undefined {
+  if (!requestFile || timeoutMs == null) return undefined;
+  try {
+    const request = JSON.parse(readFileSync(requestFile, "utf-8"));
+    if (typeof request?.requestedAt !== "number" || !Number.isFinite(request.requestedAt)) return undefined;
+    if (now - request.requestedAt < timeoutMs) return undefined;
+    return (
+      readProcessExitSidecar(processExitFile) ?? {
+        reason: "error",
+        exitCode: 124,
+        error: "shutdown-timeout",
+        shutdownRequestedAt: request.requestedAt,
+        shutdownElapsedMs: now - request.requestedAt,
+      }
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function readProcessExitSidecar(processExitFile?: string): PollResult | undefined {
+  if (!processExitFile) return undefined;
+  try {
+    const data = JSON.parse(readFileSync(processExitFile, "utf-8"));
+    if (typeof data !== "object" || data === null || data.type !== "process_exit") return undefined;
+    if (!Number.isInteger(data.exitCode)) return undefined;
+    return { reason: "sentinel", exitCode: data.exitCode };
   } catch {
     return undefined;
   }
@@ -334,10 +374,24 @@ async function checkTerminalExit(surface: string, sessionFile?: string): Promise
 
 async function checkPollExit(
   surface: string,
-  options: { sessionFile?: string; sentinelFile?: string },
+  options: {
+    sessionFile?: string;
+    processExitFile?: string;
+    shutdownRequestFile?: string;
+    shutdownTimeoutMs?: number;
+    now?: () => number;
+    sentinelFile?: string;
+  },
 ): Promise<PollResult | undefined> {
   return (
     readExitSidecar(options.sessionFile) ??
+    readProcessExitSidecar(options.processExitFile) ??
+    checkShutdownRequestTimeout(
+      options.shutdownRequestFile,
+      options.shutdownTimeoutMs,
+      options.now?.() ?? Date.now(),
+      options.processExitFile,
+    ) ??
     checkSentinelFile(options.sentinelFile) ??
     (await checkTerminalExit(surface, options.sessionFile))
   );
@@ -349,6 +403,10 @@ export async function pollForExit(
   options: {
     interval: number;
     sessionFile?: string;
+    processExitFile?: string;
+    shutdownRequestFile?: string;
+    shutdownTimeoutMs?: number;
+    now?: () => number;
     sentinelFile?: string;
     onTick?: (elapsed: number) => void;
   },

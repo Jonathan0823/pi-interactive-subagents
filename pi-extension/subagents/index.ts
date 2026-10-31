@@ -83,7 +83,11 @@ import {
   type RegisteredSubagentExtension,
   type ResolvedToolProvider,
 } from "./loadout.ts";
-import { buildStartupDeadlineCommand, EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS } from "./startup.ts";
+import {
+  buildProcessExitCommand,
+  buildStartupDeadlineCommand,
+  EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
+} from "./startup.ts";
 import {
   type StatusSnapshot,
   type SubagentStatusState,
@@ -1145,6 +1149,7 @@ interface RunningSubagent {
 
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
+const SUBAGENT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 // When this extension is loaded inside a subagent that itself spawns children
 // (e.g. a worker delegating to scout/researcher), `subagent-done.ts` runs in the
@@ -1842,6 +1847,7 @@ export const __test__ = {
   handleSubagentSteer,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  clearSubagentExitSignals,
   runningSubagents,
   formatElapsed,
   formatTokens,
@@ -2284,6 +2290,16 @@ function launchClaudeSubagent(
   return running;
 }
 
+function clearSubagentExitSignals(sessionFile: string): void {
+  for (const suffix of [".exit", ".process-exit", ".shutdown-request"]) {
+    try {
+      unlinkSync(`${sessionFile}${suffix}`);
+    } catch {
+      // Missing or inaccessible stale signals must not prevent a new launch.
+    }
+  }
+}
+
 function launchPiSubagent(
   params: typeof SubagentParams.static,
   options: SubagentLaunchOptions,
@@ -2326,6 +2342,7 @@ function launchPiSubagent(
     ...buildPiPromptArgs({ effectiveSkills, taskDelivery: launchBehavior.taskDelivery, taskArg }).map(shellEscape),
   );
   const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
+  clearSubagentExitSignals(subagentSessionFile);
   const command = buildPiSubagentCommand(
     parts,
     cdPrefix,
@@ -2471,10 +2488,17 @@ function buildPiSubagentCommand(
         command: `${cdPrefix}${envPrefix}exec ${parts.join(" ")}`,
         readyFile: startupReadyFile,
         exitFile: `${subagentSessionFile}.exit`,
+        processExitFile: `${subagentSessionFile}.process-exit`,
+        shutdownRequestFile: `${subagentSessionFile}.shutdown-request`,
         timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
         escape: shellEscape,
       })
-    : `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
+    : buildProcessExitCommand(
+        piCommand,
+        `${subagentSessionFile}.process-exit`,
+        shellEscape,
+        `${subagentSessionFile}.shutdown-request`,
+      );
 }
 
 function sendPiSubagentCommand(
@@ -2642,6 +2666,9 @@ async function watchSubagent(running: RunningSubagent, signal: AbortSignal): Pro
     const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
       interval: 1000,
       sessionFile,
+      processExitFile: running.cli === "claude" ? undefined : `${sessionFile}.process-exit`,
+      shutdownRequestFile: running.cli === "claude" ? undefined : `${sessionFile}.shutdown-request`,
+      shutdownTimeoutMs: running.cli === "claude" ? undefined : SUBAGENT_SHUTDOWN_TIMEOUT_MS,
       sentinelFile: running.sentinelFile,
       onTick() {
         observeRunningSubagent(running);
@@ -2844,11 +2871,18 @@ function buildResumeCommand(input: {
       command: `${resumeCdPrefix}${resumeEnvPrefix}exec ${parts.join(" ")}`,
       readyFile: resumeReadyFile,
       exitFile: `${sessionPath}.exit`,
+      processExitFile: `${sessionPath}.process-exit`,
+      shutdownRequestFile: `${sessionPath}.shutdown-request`,
       timeoutMs: EXPLICIT_LOADOUT_STARTUP_TIMEOUT_MS,
       escape: shellEscape,
     });
   }
-  return `${command}; echo '__SUBAGENT_DONE_'$?'__'`;
+  return buildProcessExitCommand(
+    command,
+    `${sessionPath}.process-exit`,
+    shellEscape,
+    `${sessionPath}.shutdown-request`,
+  );
 }
 
 function buildResumeEnvironment(input: {
@@ -3422,6 +3456,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       // operate where they did before.
       const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
+      clearSubagentExitSignals(sessionPath);
       const command = buildResumeCommand({
         parts,
         loadout,

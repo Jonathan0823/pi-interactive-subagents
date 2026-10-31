@@ -32,7 +32,7 @@ import {
 } from "../pi-extension/subagents/session.ts";
 
 import { shellEscape } from "../pi-extension/subagents/tmux.ts";
-import { buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
+import { buildProcessExitCommand, buildStartupDeadlineCommand } from "../pi-extension/subagents/startup.ts";
 import {
   appendExplicitLoadoutArgs,
   authorizeToolCall,
@@ -70,9 +70,10 @@ import {
   shouldAutoExitOnAgentEnd,
   findLatestAssistantError,
   runningChildrenCount,
+  writeSubagentShutdownRequest,
 } from "../pi-extension/subagents/subagent-done.ts";
 import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
-import { __pollForExitTest__ } from "../pi-extension/subagents/tmux.ts";
+import { __pollForExitTest__, pollForExit } from "../pi-extension/subagents/tmux.ts";
 
 // --- Helpers ---
 
@@ -1244,6 +1245,50 @@ describe("subagent discovery", () => {
     assert.match(result.summary, /retried with Pi default openai\/current-model/);
   });
 
+  it("clears stale exit and shutdown signals before resuming a subagent", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "session.jsonl");
+      for (const suffix of [".exit", ".process-exit", ".shutdown-request"]) {
+        writeFileSync(`${sessionFile}${suffix}`, "stale");
+      }
+      testApi.clearSubagentExitSignals(sessionFile);
+      for (const suffix of [".exit", ".process-exit", ".shutdown-request"]) {
+        assert.equal(existsSync(`${sessionFile}${suffix}`), false);
+      }
+    });
+  });
+
+  it("does not retry shutdown-timeout failures with the configured model fallback", async () => {
+    const controller = new AbortController();
+    const running: any = {
+      id: "timed-out",
+      name: "fallback-agent",
+      task: "do work",
+      model: "anthropic/preferred",
+      fallbackModel: "openai/current-model",
+      abortController: controller,
+    };
+    let retryCalled = false;
+    const result = await testApi.watchSubagentWithFallback(
+      running,
+      controller.signal,
+      async () => {
+        retryCalled = true;
+        throw new Error("timeout must not trigger model fallback");
+      },
+      async () => ({
+        name: running.name,
+        task: running.task,
+        summary: "Subagent shutdown timed out",
+        exitCode: 124,
+        elapsed: 10,
+        error: "shutdown-timeout",
+      }),
+    );
+    assert.equal(retryCalled, false);
+    assert.equal(result.error, "shutdown-timeout");
+  });
+
   it("loads session-mode from frontmatter", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
@@ -1889,14 +1934,54 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("publishes a fresh durable process-exit sidecar for successful and failed legacy launches", () => {
+    withTempDir((dir) => {
+      const exitPath = join(dir, "session.process-exit");
+      writeFileSync(exitPath, "stale completion");
+      const command = buildProcessExitCommand("exit 7", exitPath, shellEscape);
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0);
+      assert.deepEqual(JSON.parse(readFileSync(exitPath, "utf8")), { type: "process_exit", exitCode: 7 });
+
+      const successful = buildProcessExitCommand("exit 0", exitPath, shellEscape);
+      const successResult = spawnSync("bash", ["-c", successful], { encoding: "utf8", timeout: 5000 });
+      assert.equal(successResult.status, 0);
+      assert.deepEqual(JSON.parse(readFileSync(exitPath, "utf8")), { type: "process_exit", exitCode: 0 });
+    });
+  });
+
+  it("preserves a normal explicit child nonzero exit code in its process-exit sidecar", () => {
+    withTempDir((dir) => {
+      const readyPath = join(dir, "ready");
+      const exitPath = join(dir, "session.exit");
+      const processExitPath = join(dir, "session.process-exit");
+      const command = buildStartupDeadlineCommand({
+        command: `printf ready > ${shellEscape(readyPath)}; exit 9`,
+        readyFile: readyPath,
+        exitFile: exitPath,
+        processExitFile: processExitPath,
+        shutdownRequestFile: join(dir, "session.shutdown-request"),
+        timeoutMs: 1000,
+        escape: shellEscape,
+      });
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(processExitPath, "utf8")), { type: "process_exit", exitCode: 9 });
+    });
+  });
+
   it("terminates an explicit child that does not signal startup readiness by its deadline", () => {
     withTempDir((dir) => {
       const readyPath = join(dir, "ready");
       const exitPath = join(dir, "session.exit");
+      const processExitPath = join(dir, "session.process-exit");
       const command = buildStartupDeadlineCommand({
         command: "exec sleep 5",
         readyFile: readyPath,
         exitFile: exitPath,
+        processExitFile: processExitPath,
+        shutdownRequestFile: join(dir, "session.shutdown-request"),
         timeoutMs: 100,
         escape: shellEscape,
       });
@@ -1907,6 +1992,7 @@ describe("subagent discovery", () => {
         type: "error",
         errorMessage: "Explicit subagent startup timed out before loadout readiness.",
       });
+      assert.deepEqual(JSON.parse(readFileSync(processExitPath, "utf8")), { type: "process_exit", exitCode: 143 });
     });
   });
 
@@ -1919,6 +2005,8 @@ describe("subagent discovery", () => {
         command: `printf '%s' ${shellEscape(JSON.stringify(childError))} > ${shellEscape(exitPath)}; exec sleep 5`,
         readyFile: readyPath,
         exitFile: exitPath,
+        processExitFile: join(dir, "session.process-exit"),
+        shutdownRequestFile: join(dir, "session.shutdown-request"),
         timeoutMs: 500,
         escape: shellEscape,
       });
@@ -1932,10 +2020,16 @@ describe("subagent discovery", () => {
     withTempDir((dir) => {
       const readyPath = join(dir, "ready");
       const exitPath = join(dir, "session.exit");
+      const processExitPath = join(dir, "session.process-exit");
+      const shutdownRequestPath = join(dir, "session.shutdown-request");
+      writeFileSync(processExitPath, "stale completion");
+      writeFileSync(shutdownRequestPath, "stale request");
       const command = buildStartupDeadlineCommand({
         command: `printf ready > ${shellEscape(readyPath)}; exec true`,
         readyFile: readyPath,
         exitFile: exitPath,
+        processExitFile: processExitPath,
+        shutdownRequestFile: shutdownRequestPath,
         timeoutMs: 1000,
         escape: shellEscape,
       });
@@ -1944,6 +2038,8 @@ describe("subagent discovery", () => {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(readFileSync(readyPath, "utf8"), "ready");
       assert.equal(existsSync(exitPath), false);
+      assert.deepEqual(JSON.parse(readFileSync(processExitPath, "utf8")), { type: "process_exit", exitCode: 0 });
+      assert.equal(existsSync(shutdownRequestPath), false);
     });
   });
 
@@ -3056,6 +3152,7 @@ describe("subagent-done.ts", () => {
           },
         );
         assert.equal(shutdown, false, "pending question with no reply must park, not exit");
+        assert.equal(existsSync(`${join(dir, "s.jsonl")}.shutdown-request`), false);
       } finally {
         restore();
         rmSync(dir, { recursive: true, force: true });
@@ -3101,8 +3198,135 @@ describe("subagent-done.ts", () => {
   });
 });
 
-describe("tmux.ts interpretExitSidecar", () => {
-  const { interpretExitSidecar } = __pollForExitTest__;
+describe("tmux.ts exit sidecars", () => {
+  const { interpretExitSidecar, readProcessExitSidecar } = __pollForExitTest__;
+
+  it("times out only after a genuine shutdown request exceeds its grace period", () => {
+    const { checkShutdownRequestTimeout } = __pollForExitTest__;
+    withTempDir((dir) => {
+      const requestFile = join(dir, "child.shutdown-request");
+      assert.equal(checkShutdownRequestTimeout(requestFile, 1_000, 5_000), undefined);
+      writeFileSync(requestFile, JSON.stringify({ requestedAt: 4_500 }));
+      assert.equal(checkShutdownRequestTimeout(requestFile, 1_000, 5_499), undefined);
+      assert.deepEqual(checkShutdownRequestTimeout(requestFile, 1_000, 5_500), {
+        reason: "error",
+        exitCode: 124,
+        error: "shutdown-timeout",
+        shutdownRequestedAt: 4_500,
+        shutdownElapsedMs: 1_000,
+      });
+      writeFileSync(requestFile, "invalid");
+      assert.equal(checkShutdownRequestTimeout(requestFile, 1_000, 9_000), undefined);
+    });
+  });
+
+  it("detects a shutdown request that exceeds its deadline without waiting for tmux output", async () => {
+    const dir = createTestDir();
+    try {
+      const shutdownRequestFile = join(dir, "child.shutdown-request");
+      writeFileSync(shutdownRequestFile, JSON.stringify({ requestedAt: 1 }));
+      const result = await pollForExit("unused", new AbortController().signal, {
+        interval: 1,
+        shutdownRequestFile,
+        shutdownTimeoutMs: 1,
+        now: () => 10_000,
+      });
+      assert.deepEqual(result, {
+        reason: "error",
+        exitCode: 124,
+        error: "shutdown-timeout",
+        shutdownRequestedAt: 1,
+        shutdownElapsedMs: 9_999,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a process exit that arrives within the shutdown grace period", async () => {
+    const dir = createTestDir();
+    try {
+      const processExitFile = join(dir, "child.process-exit");
+      const shutdownRequestFile = join(dir, "child.shutdown-request");
+      writeFileSync(shutdownRequestFile, JSON.stringify({ requestedAt: 1_000 }));
+      let now = 1_500;
+      const result = await pollForExit("unused", new AbortController().signal, {
+        interval: 1,
+        processExitFile,
+        shutdownRequestFile,
+        shutdownTimeoutMs: 1_000,
+        now: () => now,
+        onTick() {
+          writeFileSync(processExitFile, JSON.stringify({ type: "process_exit", exitCode: 0 }));
+          now = 1_999;
+        },
+      });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers a process exit that races with the shutdown deadline", async () => {
+    const dir = createTestDir();
+    try {
+      const processExitFile = join(dir, "child.process-exit");
+      const shutdownRequestFile = join(dir, "child.shutdown-request");
+      writeFileSync(shutdownRequestFile, JSON.stringify({ requestedAt: 1 }));
+      const result = await pollForExit("unused", new AbortController().signal, {
+        interval: 1,
+        processExitFile,
+        shutdownRequestFile,
+        shutdownTimeoutMs: 1,
+        now: () => {
+          writeFileSync(processExitFile, JSON.stringify({ type: "process_exit", exitCode: 0 }));
+          return 10_000;
+        },
+      });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers confirmed process exit over an expired shutdown deadline", async () => {
+    const dir = createTestDir();
+    try {
+      const processExitFile = join(dir, "child.process-exit");
+      const shutdownRequestFile = join(dir, "child.shutdown-request");
+      writeFileSync(processExitFile, JSON.stringify({ type: "process_exit", exitCode: 0 }));
+      writeFileSync(shutdownRequestFile, JSON.stringify({ requestedAt: 1 }));
+      const result = await pollForExit("unused", new AbortController().signal, {
+        interval: 1,
+        processExitFile,
+        shutdownRequestFile,
+        shutdownTimeoutMs: 1,
+        now: () => 10_000,
+      });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a timestamped shutdown request atomically for the parent watcher", () => {
+    withTempDir((dir) => {
+      const sessionFile = join(dir, "child.jsonl");
+      writeSubagentShutdownRequest(sessionFile, 1234);
+      assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.shutdown-request`, "utf8")), { requestedAt: 1234 });
+    });
+  });
+
+  it("reads durable process exit codes and ignores malformed or incomplete records", () => {
+    withTempDir((dir) => {
+      const processExitFile = join(dir, "child.process-exit");
+      assert.equal(readProcessExitSidecar(processExitFile), undefined);
+      writeFileSync(processExitFile, '{"type":"process_exit","exitCode":7}');
+      assert.deepEqual(readProcessExitSidecar(processExitFile), { reason: "sentinel", exitCode: 7 });
+      writeFileSync(processExitFile, '{"type":"process_exit","exitCode":"0"}');
+      assert.equal(readProcessExitSidecar(processExitFile), undefined);
+    });
+  });
 
   it("no longer decodes ping payloads (ask_question keeps the session open instead)", () => {
     // ask_question writes a `.ask` signal, not a `.exit` ping sidecar, so an
