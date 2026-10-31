@@ -418,9 +418,10 @@ export default function subagentDone(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
+      const question = (args as { question?: unknown }).question;
       const text =
         theme.fg("toolTitle", theme.bold("ask_question ")) +
-        theme.fg("muted", String((args as { question?: unknown }).question ?? ""));
+        theme.fg("muted", typeof question === "string" ? question : "");
       return new Text(text, 0, 0);
     },
   });
